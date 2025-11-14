@@ -1,0 +1,1016 @@
+# 📋 Source of Truth Plan for SparkShelf
+
+## 🎯 Purpose
+This document serves as the **single source of truth** for all technical decisions, data structures, implementation details, and development standards for SparkShelf. It bridges the PRD vision with executable engineering specifications.
+
+---
+
+## 1️⃣ System Architecture
+
+### Technology Stack (Locked)
+
+```
+Frontend:
+├── Framework: React 18+ with TypeScript
+├── Styling: TailwindCSS + Framer Motion
+├── State Management: Zustand (lightweight, perfect for swipe state)
+├── Routing: React Router v6
+└── Build Tool: Vite
+
+Backend:
+├── BaaS: Supabase (chosen for PostgreSQL + realtime + auth)
+├── Storage: Supabase Storage (project images, user uploads)
+├── Edge Functions: Supabase Functions (AI proxy, webhooks)
+└── Database: PostgreSQL with Row Level Security
+
+AI Integration:
+├── Primary: OpenAI GPT-4o-mini (cost-effective)
+├── Fallback: Claude Sonnet (via Anthropic API)
+└── Proxy Layer: Supabase Edge Function (API key security)
+
+Hosting & Deployment:
+├── Frontend: Vercel (automatic previews + edge functions)
+├── Domain: sparkshelf.tn or sparkshelf.vercel.app
+└── CDN: Vercel Edge Network
+```
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    User Interface                        │
+│  (React + TailwindCSS + Framer Motion)                  │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│              State Management (Zustand)                  │
+│  ├── swipeState  ├── userState  ├── projectState        │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│                   API Layer                              │
+│  ├── Supabase Client  ├── AI Service  ├── Storage       │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│                Supabase Backend                          │
+│  ├── PostgreSQL  ├── Auth  ├── Storage  ├── Realtime    │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2️⃣ Database Schema
+
+### Core Tables
+
+#### `users`
+```sql
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email TEXT UNIQUE NOT NULL,
+  full_name TEXT,
+  avatar_url TEXT,
+  skill_level TEXT CHECK (skill_level IN ('beginner', 'intermediate', 'advanced')),
+  xp_points INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+#### `projects`
+```sql
+CREATE TABLE projects (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  thumbnail_url TEXT NOT NULL,
+  
+  -- Filters
+  difficulty TEXT CHECK (difficulty IN ('beginner', 'intermediate', 'advanced')),
+  estimated_cost_tnd INTEGER, -- in TND
+  time_commitment TEXT CHECK (time_commitment IN ('short', 'medium', 'long')),
+  domain TEXT[], -- Array: ['mechanical', 'electrical', 'software', 'hybrid', 'aero']
+  
+  -- Content
+  components JSONB, -- [{name, quantity, avg_price_tnd, local_suppliers}]
+  steps JSONB, -- [{step_number, title, description, image_url}]
+  tags TEXT[], -- ['arduino', 'iot', 'automation']
+  
+  -- Metadata
+  views_count INTEGER DEFAULT 0,
+  saves_count INTEGER DEFAULT 0,
+  difficulty_score NUMERIC(3,2), -- 1.00 to 5.00 for AI sorting
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_projects_difficulty ON projects(difficulty);
+CREATE INDEX idx_projects_cost ON projects(estimated_cost_tnd);
+CREATE INDEX idx_projects_domain ON projects USING GIN(domain);
+```
+
+#### `user_projects`
+```sql
+CREATE TABLE user_projects (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  
+  status TEXT CHECK (status IN ('saved', 'in_progress', 'completed')),
+  
+  -- Progress tracking
+  progress_percentage INTEGER DEFAULT 0,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  
+  -- User content
+  notes TEXT,
+  custom_components JSONB, -- User's component modifications
+  photos TEXT[], -- Array of uploaded image URLs
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  UNIQUE(user_id, project_id)
+);
+
+CREATE INDEX idx_user_projects_user ON user_projects(user_id);
+CREATE INDEX idx_user_projects_status ON user_projects(status);
+```
+
+#### `swipe_history`
+```sql
+CREATE TABLE swipe_history (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  action TEXT CHECK (action IN ('like', 'skip')),
+  swiped_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  UNIQUE(user_id, project_id)
+);
+
+CREATE INDEX idx_swipe_history_user ON swipe_history(user_id);
+```
+
+#### `achievements`
+```sql
+CREATE TABLE achievements (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL,
+  description TEXT,
+  icon_url TEXT,
+  xp_reward INTEGER DEFAULT 0,
+  requirement JSONB, -- {type: 'complete_projects', count: 5}
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+#### `user_achievements`
+```sql
+CREATE TABLE user_achievements (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  achievement_id UUID REFERENCES achievements(id) ON DELETE CASCADE,
+  unlocked_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  UNIQUE(user_id, achievement_id)
+);
+```
+
+#### `community_posts`
+```sql
+CREATE TABLE community_posts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES projects(id),
+  
+  title TEXT NOT NULL,
+  description TEXT,
+  images TEXT[], -- Array of image URLs
+  
+  upvotes_count INTEGER DEFAULT 0,
+  comments_count INTEGER DEFAULT 0,
+  
+  is_featured BOOLEAN DEFAULT FALSE,
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_community_posts_featured ON community_posts(is_featured, created_at DESC);
+```
+
+#### `ai_conversations`
+```sql
+CREATE TABLE ai_conversations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES projects(id),
+  
+  messages JSONB, -- [{role: 'user'|'assistant', content: '...', timestamp}]
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_ai_conversations_user ON ai_conversations(user_id, updated_at DESC);
+```
+
+---
+
+## 3️⃣ API Specifications
+
+### Authentication Endpoints
+```typescript
+// Handled by Supabase Auth
+POST /auth/signup
+POST /auth/login
+POST /auth/logout
+POST /auth/google (OAuth)
+GET  /auth/session
+```
+
+### Projects API
+```typescript
+// Get paginated projects for swipe feed
+GET /api/projects/feed
+Query params: {
+  limit: number (default: 10),
+  offset: number,
+  difficulty?: 'beginner' | 'intermediate' | 'advanced',
+  max_cost?: number,
+  time_commitment?: 'short' | 'medium' | 'long',
+  domains?: string[] // ['mechanical', 'electrical']
+}
+Response: {
+  projects: Project[],
+  hasMore: boolean,
+  nextOffset: number
+}
+
+// Get single project details
+GET /api/projects/:id
+Response: Project
+
+// Get user's saved projects
+GET /api/users/me/projects
+Query params: {
+  status?: 'saved' | 'in_progress' | 'completed'
+}
+Response: UserProject[]
+
+// Save project (swipe right)
+POST /api/projects/:id/save
+Response: { success: boolean, userProject: UserProject }
+
+// Update project progress
+PATCH /api/user-projects/:id
+Body: {
+  status?: string,
+  progress_percentage?: number,
+  notes?: string,
+  photos?: string[]
+}
+```
+
+### AI Assistant API
+```typescript
+// Start or continue conversation
+POST /api/ai/chat
+Body: {
+  projectId?: string,
+  conversationId?: string,
+  message: string
+}
+Response: {
+  conversationId: string,
+  reply: string,
+  suggestions?: string[] // Follow-up prompts
+}
+
+// Get conversation history
+GET /api/ai/conversations/:id
+Response: {
+  messages: Message[],
+  projectContext?: Project
+}
+```
+
+### Community API
+```typescript
+// Get community showcase feed
+GET /api/community/posts
+Query params: {
+  limit: number,
+  offset: number,
+  featured?: boolean
+}
+Response: CommunityPost[]
+
+// Create showcase post
+POST /api/community/posts
+Body: {
+  projectId: string,
+  title: string,
+  description: string,
+  images: string[]
+}
+Response: CommunityPost
+
+// Upvote post
+POST /api/community/posts/:id/upvote
+Response: { upvotes_count: number }
+```
+
+---
+
+## 4️⃣ Frontend Structure
+
+### Project Directory
+```
+sparkshelf/
+├── src/
+│   ├── components/
+│   │   ├── SwipeCard/
+│   │   │   ├── SwipeCard.tsx
+│   │   │   ├── SwipeGesture.tsx
+│   │   │   └── ProjectFilters.tsx
+│   │   ├── AIChat/
+│   │   │   ├── ChatInterface.tsx
+│   │   │   ├── MessageBubble.tsx
+│   │   │   └── VoiceInput.tsx
+│   │   ├── Portfolio/
+│   │   │   ├── ProjectGrid.tsx
+│   │   │   ├── SkillsRadar.tsx
+│   │   │   ├── ProgressTimeline.tsx
+│   │   │   └── BadgeCollection.tsx
+│   │   ├── Community/
+│   │   │   ├── PostCard.tsx
+│   │   │   ├── CreatePost.tsx
+│   │   │   └── CommentSection.tsx
+│   │   └── shared/
+│   │       ├── Button.tsx
+│   │       ├── Card.tsx
+│   │       ├── Modal.tsx
+│   │       └── ThemeToggle.tsx
+│   ├── pages/
+│   │   ├── Home.tsx (Swipe Interface)
+│   │   ├── Portfolio.tsx
+│   │   ├── AIAssistant.tsx
+│   │   ├── Community.tsx
+│   │   └── ProjectDetails.tsx
+│   ├── stores/
+│   │   ├── useSwipeStore.ts
+│   │   ├── useUserStore.ts
+│   │   ├── useProjectStore.ts
+│   │   └── useAIStore.ts
+│   ├── services/
+│   │   ├── supabase.ts
+│   │   ├── ai.service.ts
+│   │   ├── projects.service.ts
+│   │   └── storage.service.ts
+│   ├── hooks/
+│   │   ├── useSwipeGesture.ts
+│   │   ├── useInfiniteScroll.ts
+│   │   └── useAuth.ts
+│   ├── utils/
+│   │   ├── animations.ts (Framer Motion configs)
+│   │   ├── currency.ts (TND formatting)
+│   │   └── constants.ts
+│   └── styles/
+│       ├── globals.css
+│       └── themes.css (Cyber core variables)
+├── public/
+│   ├── fonts/
+│   ├── images/
+│   └── icons/
+├── supabase/
+│   ├── migrations/
+│   └── functions/
+└── package.json
+```
+
+### Key Components Specs
+
+#### SwipeCard Component
+```typescript
+interface SwipeCardProps {
+  project: Project;
+  onSwipeLeft: () => void;
+  onSwipeRight: () => void;
+  style?: React.CSSProperties;
+}
+
+// Features:
+// - Drag gesture detection (threshold: 100px)
+// - Spring animation on release
+// - Opacity based on drag distance
+// - Rotate based on drag angle
+```
+
+#### Filters Component
+```typescript
+interface FiltersState {
+  difficulty: ('beginner' | 'intermediate' | 'advanced')[];
+  costRange: [number, number]; // [min, max] in TND
+  timeCommitment: ('short' | 'medium' | 'long')[];
+  domains: string[];
+}
+
+// UI: Collapsible sidebar with animated chips
+// Persistence: localStorage + URL params
+```
+
+---
+
+## 5️⃣ Design System
+
+### Color Tokens (CSS Variables)
+```css
+:root {
+  --color-bg-primary: #1E1E1E;
+  --color-bg-secondary: #2A2A2A;
+  --color-bg-card: #252525;
+  
+  --color-primary: #3C8DAD;
+  --color-primary-glow: rgba(60, 141, 173, 0.3);
+  
+  --color-accent: #A7262A;
+  --color-accent-glow: rgba(167, 38, 42, 0.3);
+  
+  --color-secondary: #6B705C;
+  
+  --color-text-primary: #F5F2E7;
+  --color-text-secondary: #B8B5AA;
+  --color-text-muted: #6B6966;
+  
+  --color-success: #4ADE80;
+  --color-warning: #FBBF24;
+  --color-error: #EF4444;
+  
+  --font-display: 'Orbitron', sans-serif;
+  --font-mono: 'Monoid', monospace;
+  --font-body: 'IBM Plex Sans', sans-serif;
+  
+  --shadow-glow: 0 0 20px var(--color-primary-glow);
+  --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.5);
+  
+  --border-radius-sm: 4px;
+  --border-radius-md: 8px;
+  --border-radius-lg: 16px;
+  
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+```
+
+### Component Patterns
+
+#### Button Variants
+```typescript
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
+
+// Primary: Neon cyan with glow, used for main actions
+// Secondary: Dusty olive, used for less prominent actions
+// Ghost: Transparent with border, used for tertiary actions
+// Danger: Crimson red, used for destructive actions
+```
+
+#### Card Component
+```typescript
+interface CardProps {
+  variant: 'default' | 'elevated' | 'outlined';
+  glow?: boolean; // Adds neon glow effect
+  scanlines?: boolean; // Adds CRT scanline overlay
+}
+```
+
+---
+
+## 6️⃣ Data Seeding Strategy
+
+### Initial 100 Projects Structure
+```typescript
+interface ProjectSeed {
+  title: string;
+  description: string;
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  estimated_cost_tnd: number;
+  time_commitment: 'short' | 'medium' | 'long';
+  domain: ('mechanical' | 'electrical' | 'software' | 'hybrid' | 'aero')[];
+  tags: string[];
+  components: Component[];
+  steps: Step[];
+  thumbnail_url: string;
+}
+
+// Categories Distribution:
+// - Beginner: 40 projects (40%)
+// - Intermediate: 40 projects (40%)
+// - Advanced: 20 projects (20%)
+
+// Domain Distribution:
+// - Arduino/IoT: 30 projects
+// - Mechanical: 15 projects
+// - Aero & Drones: 15 projects
+// - Automation: 20 projects
+// - Hybrid: 20 projects
+```
+
+### Sample Projects
+```json
+[
+  {
+    "title": "LED Matrix Clock",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 85,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["arduino", "led", "rtc"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Promesse", "Technopole"]
+      },
+      {
+        "name": "8x8 LED Matrix (MAX7219)",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Promesse"]
+      }
+    ]
+  },
+  {
+    "title": "Line Following Robot",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 180,
+    "time_commitment": "medium",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["robotics", "sensors", "motors"]
+  },
+  {
+    "title": "Quadcopter from Scratch",
+    "difficulty": "advanced",
+    "estimated_cost_tnd": 450,
+    "time_commitment": "long",
+    "domain": ["aero", "electrical", "software"],
+    "tags": ["drone", "flight-controller", "3d-printing"]
+  }
+]
+```
+
+### Tunisian Supplier Database
+```typescript
+const suppliers = {
+  promesse: {
+    name: "Promesse Electronique",
+    location: "Tunis",
+    specialties: ["arduino", "sensors", "components"],
+    website: "promesse.tn"
+  },
+  technopole: {
+    name: "Technopole",
+    location: "Multiple locations",
+    specialties: ["dev-boards", "iot", "tools"]
+  },
+  sotufab: {
+    name: "SotuFab",
+    location: "Sousse",
+    specialties: ["3d-printing", "fabrication", "prototyping"]
+  }
+};
+```
+
+---
+
+## 7️⃣ AI Assistant Specifications
+
+### System Prompt Template
+```
+You are SparkShelf AI, an expert robotics assistant helping users build projects.
+
+Context:
+- User skill level: {user.skill_level}
+- Current project: {project.title}
+- Project difficulty: {project.difficulty}
+- Available budget: {estimatedBudget} TND
+- Location: Tunisia (prioritize local suppliers)
+
+Guidelines:
+1. Provide step-by-step guidance tailored to skill level
+2. Suggest component alternatives from Tunisian suppliers
+3. Estimate costs in TND
+4. Offer learning resources for unfamiliar concepts
+5. Be encouraging and educational
+6. Keep responses concise but thorough
+
+Available local suppliers: Promesse, Technopole, SotuFab
+```
+
+### Conversation Features
+```typescript
+interface AIFeatures {
+  componentSubstitution: boolean; // "Can I use X instead of Y?"
+  skillAssessment: boolean; // "Is this too hard for me?"
+  stepBreakdown: boolean; // "Explain step 3 in detail"
+  troubleshooting: boolean; // "My motor isn't spinning"
+  costOptimization: boolean; // "How to reduce cost?"
+  learningPaths: boolean; // "What should I learn first?"
+}
+```
+
+### Rate Limiting
+```typescript
+const AI_LIMITS = {
+  free_tier: {
+    messages_per_day: 50,
+    max_message_length: 500,
+    conversation_history: 20 // messages
+  },
+  premium_tier: {
+    messages_per_day: 500,
+    max_message_length: 2000,
+    conversation_history: 100
+  }
+};
+```
+
+---
+
+## 8️⃣ Gamification System
+
+### XP & Leveling
+```typescript
+interface XPSystem {
+  actions: {
+    swipe_right: 5,
+    complete_project: 100,
+    upload_photo: 20,
+    write_review: 15,
+    help_community: 25,
+    daily_login: 10
+  },
+  levels: {
+    1: { xp: 0, title: "Novice Maker" },
+    2: { xp: 100, title: "Tinkerer" },
+    3: { xp: 300, title: "Builder" },
+    5: { xp: 750, title: "Engineer" },
+    10: { xp: 2000, title: "Master Maker" }
+  }
+}
+```
+
+### Achievements List
+```json
+[
+  {
+    "name": "First Steps",
+    "description": "Complete your first project",
+    "icon": "🎯",
+    "xp_reward": 50,
+    "requirement": { "type": "complete_projects", "count": 1 }
+  },
+  {
+    "name": "Budget Builder",
+    "description": "Complete 3 projects under 100 TND",
+    "icon": "💰",
+    "xp_reward": 75,
+    "requirement": { "type": "budget_projects", "max_cost": 100, "count": 3 }
+  },
+  {
+    "name": "Automation Master",
+    "description": "Complete 5 automation projects",
+    "icon": "🤖",
+    "xp_reward": 150,
+    "requirement": { "type": "domain_projects", "domain": "automation", "count": 5 }
+  },
+  {
+    "name": "Community Hero",
+    "description": "Get 100 upvotes on your posts",
+    "icon": "⭐",
+    "xp_reward": 200,
+    "requirement": { "type": "total_upvotes", "count": 100 }
+  }
+]
+```
+
+---
+
+## 9️⃣ Performance Standards
+
+### Core Web Vitals Targets
+```typescript
+const PERFORMANCE_TARGETS = {
+  LCP: 2.5, // Largest Contentful Paint (seconds)
+  FID: 100, // First Input Delay (milliseconds)
+  CLS: 0.1, // Cumulative Layout Shift
+  
+  // Custom metrics
+  swipe_fps: 60, // Smooth 60fps animations
+  image_load: 1.5, // seconds for thumbnail
+  api_response: 500 // milliseconds
+};
+```
+
+### Optimization Strategies
+```typescript
+// Image optimization
+const IMAGE_CONFIG = {
+  formats: ['webp', 'jpg'],
+  sizes: {
+    thumbnail: { width: 400, height: 300 },
+    detail: { width: 1200, height: 900 },
+    avatar: { width: 150, height: 150 }
+  },
+  lazy_loading: true,
+  blur_placeholder: true
+};
+
+// Code splitting
+const LAZY_ROUTES = [
+  '/portfolio',
+  '/community',
+  '/ai-assistant',
+  '/admin'
+];
+
+// Caching strategy
+const CACHE_CONFIG = {
+  projects_feed: '5 minutes',
+  project_details: '1 hour',
+  user_profile: '10 minutes',
+  static_assets: '1 year'
+};
+```
+
+---
+
+## 🔟 Security & Privacy
+
+### Authentication Security
+```typescript
+// Supabase RLS Policies
+const RLS_POLICIES = {
+  users: {
+    select: "auth.uid() = id",
+    update: "auth.uid() = id"
+  },
+  user_projects: {
+    select: "auth.uid() = user_id",
+    insert: "auth.uid() = user_id",
+    update: "auth.uid() = user_id"
+  },
+  community_posts: {
+    select: "true", // Public read
+    insert: "auth.uid() = user_id",
+    update: "auth.uid() = user_id"
+  }
+};
+```
+
+### Data Privacy
+```typescript
+interface PrivacySettings {
+  profile_visibility: 'public' | 'private';
+  show_completed_projects: boolean;
+  allow_community_messages: boolean;
+  share_progress_stats: boolean;
+}
+
+// GDPR Compliance
+const GDPR_FEATURES = {
+  export_data: true, // Download all user data as JSON
+  delete_account: true, // Complete data deletion
+  opt_out_analytics: true
+};
+```
+
+### API Key Security
+```typescript
+// All AI API calls proxied through Supabase Edge Functions
+// Frontend never exposes API keys
+const AI_PROXY_CONFIG = {
+  endpoint: '/functions/v1/ai-chat',
+  rate_limit: '100 requests per hour per user',
+  timeout: 30000, // 30 seconds
+  sanitize_input: true
+};
+```
+
+---
+
+## 1️⃣1️⃣ Testing Strategy
+
+### Test Coverage Requirements
+```typescript
+const COVERAGE_TARGETS = {
+  unit_tests: 80, // % coverage
+  integration_tests: 60,
+  e2e_tests: 'critical_paths' // Swipe, save, AI chat, portfolio
+};
+```
+
+### Test Cases Priority
+```typescript
+const CRITICAL_TESTS = [
+  'User can swipe through projects',
+  'Swipe right saves project',
+  'Filters update feed correctly',
+  'AI chat responds within 5 seconds',
+  'Portfolio displays saved projects',
+  'XP increases on project completion',
+  'Images load with blur placeholder'
+];
+```
+
+### Tools
+```
+- Unit: Vitest
+- Integration: React Testing Library
+- E2E: Playwright
+- Visual Regression: Chromatic (Storybook)
+```
+
+---
+
+## 1️⃣2️⃣ Deployment Pipeline
+
+### Environments
+```typescript
+const ENVIRONMENTS = {
+  development: {
+    url: 'localhost:5173',
+    supabase: 'dev project',
+    ai_models: 'gpt-4o-mini'
+  },
+  staging: {
+    url: 'staging.sparkshelf.vercel.app',
+    supabase: 'staging project',
+    ai_models: 'gpt-4o-mini'
+  },
+  production: {
+    url: 'sparkshelf.tn',
+    supabase: 'prod project',
+    ai_models: 'gpt-4o-mini with fallback'
+  }
+};
+```
+
+### CI/CD Workflow
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main, develop]
+
+jobs:
+  test:
+    - Run linting (ESLint)
+    - Run type checking (TypeScript)
+    - Run unit tests (Vitest)
+    - Run E2E tests (Playwright)
+  
+  build:
+    - Build frontend (Vite)
+    - Optimize images
+    - Generate sitemap
+  
+  deploy:
+    - Deploy to Vercel
+    - Run smoke tests
+    - Notify team on Slack
+```
+
+---
+
+## 1️⃣3️⃣ Monitoring & Analytics
+
+### Metrics to Track
+```typescript
+const ANALYTICS_EVENTS = {
+  // User behavior
+  'project_viewed': { project_id, difficulty, cost },
+  'project_swiped': { project_id, action: 'like' | 'skip' },
+  'filter_applied': { filters: FilterState },
+  'ai_message_sent': { project_id?, message_length },
+  'project_marked_complete': { project_id, time_to_complete },
+  
+  // Performance
+  'page_load_time': { page, duration },
+  'api_response_time': { endpoint, duration },
+  'image_load_time': { url, duration },
+  
+  // Errors
+  'error_occurred': { type, message, stack }
+};
+```
+
+### Tools
+```
+- Analytics: PostHog (self-hosted alternative)
+- Error Tracking: Sentry
+- Performance: Vercel Analytics
+- Database: Supabase Dashboard
+```
+
+---
+
+## 1️⃣4️⃣ Localization Plan
+
+### Supported Languages (Phase 5)
+```typescript
+const LOCALES = {
+  en: 'English',
+  fr: 'Français',
+  ar: 'العربية' // RTL support
+};
+
+// i18n Structure
+const translations = {
+  en: {
+    common: { /* buttons, labels */ },
+    swipe: { /* card text */ },
+    ai: { /* chat interface */ },
+    portfolio: { /* stats, achievements */ }
+  }
+  // ... fr, ar
+};
+```
+
+### RTL Considerations
+```css
+/* Automatic RTL flipping for Arabic */
+[dir="rtl"] .swipe-card {
+  transform: scaleX(-1);
+}
+
+/* Keep numbers LTR even in RTL */
+.price, .xp-count {
+  direction: ltr;
+  unicode-bidi: embed;
+}
+```
+
+---
+
+## 1️⃣5️⃣ Admin Dashboard Specs
+
+### Admin Roles
+```typescript
+enum AdminRole {
+  SUPER_ADMIN = 'super_admin', // Full access
+  CONTENT_MANAGER = 'content_manager', // Projects CRUD
+  MODERATOR = 'moderator' // Community moderation
+}
+```
+
+### Dashboard Features
+```
+┌──────────────────────────────────────┐
+│          Admin Dashboard              │
+├──────────────────────────────────────┤
+│ 📊 Analytics                         │
+│    ├── Total Users                    │
+│    ├── Active Projects                │
+│    ├── Daily Swipes                   │
+│    └── AI Chat Usage                  │
+│                                       │
+│ 📝 Content Management                │
+│    ├── Add/Edit/Delete Projects       │
+│    ├── Bulk Import (CSV)              │
+│    └── Media Library                  │
+│                                       │
+│ 👥 User Management                   │
+│    ├── User List                      │
+│    ├── Ban/Suspend                    │
+│    └── View User Portfolios           │
+│                                       │
+│ 🛡️ Moderation                        │
+│    ├── Flagged Community Posts        │
+│    ├── Reported Content               │
+│    └── Comment Moderation             │
+└──────────────────────────────────────┘
+```
+
+---
+
+## 1️⃣6️⃣ Migration & Versioning
+
+### Database Migration Strategy
+```bash
+# Supabase migration workflow
+supabase migration new add_projects_table
+# Edit SQL file
+supabase db push
+supabase db reset # for testing
+```
+
+### API Vers

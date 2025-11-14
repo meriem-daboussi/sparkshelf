@@ -1,0 +1,219 @@
+# 🧠 Product Requirements Document (PRD)
+
+## 🪄 Product Name
+
+**SparkShelf**
+
+## 💡 Tagline
+
+**“Swipe. Build. Innovate.”**
+A swipe-based idea platform for robotics enthusiasts to discover, plan, and showcase their builds.
+
+
+## 1️⃣ Vision & Mission
+
+### Vision
+
+To become the go-to hub for **robotics inspiration and project execution**—bridging creative engineering ideas with actionable guidance for students and hobbyists.
+
+### Mission
+
+SparkShelf helps users discover curated robotics projects, tailored to their skill level, budget, and available time. It simplifies exploration with a swipe interface, empowers users through an AI assistant, and nurtures a community of makers in Tunisia and beyond.
+
+---
+
+## 2️⃣ Target Audience
+
+| Segment                                 | Description                                                         | Needs                                                                                            |
+| ------------------------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| 🎓 **Engineering Students**  | From preparatory cycles to engineering schools | Project inspiration for coursework, competitions, or skill growth |
+| 🤖 **Robotics Hobbyists**   | Makers, tinkerers, Arduino/IoT fans            | Quick discovery of project ideas and part lists                   |
+| 🧩 **Educators / Clubs**    | Teachers, robotics societies                   | Structured project libraries for workshops                        |
+| 🌍 **Tunisian Market**      | Local focus                                    | Prices and components available in **TND** from Tunisian stores   |
+
+---
+
+## 3️⃣ Product Goals
+
+1. Provide a **gamified discovery experience** for robotics ideas.
+2. Offer **AI-guided assistance** for project execution.
+3. Enable users to **track skill progression** and showcase achievements.
+4. Build a **localized, scalable database** of project ideas.
+5. Foster a **community** of Tunisian and global makers.
+
+---
+
+## 4️⃣ Core Features
+
+### 🔹 1. Swipe Interface (Main Page)
+
+* **Card layout:**
+
+  * Project title + thumbnail image
+  * Icons for difficulty, time estimate, and cost (in TND)
+  * Tags (e.g. Arduino, IoT, Mechanics, Automation, Aero and drones)
+
+* **Gestures:**
+
+  * Swipe right → Save to *My Projects*
+  * Swipe left → Skip to next
+
+* **Filters:**
+
+  * Difficulty (Beginner / Intermediate / Advanced)
+  * Cost (0–100 TND, 100–300 TND, 300+)
+  * Time commitment (Short-term <1 week, Medium 1–3 weeks, Long-term)
+  * Robotics domain (Mechanical / Electrical / Software / Hybrid/ Aero & drones)
+
+* **Database:**
+
+  * Starts with **100 curated projects**
+  * Expandable through admin panel
+
+* **UI vibe:**
+  Smooth transitions, **retro-futuristic cyber core** aesthetic — neon edges, analog textures, CRT flicker.
+
+---
+
+### 🤖 2. AI Project Assistant
+
+* **Interactive Chat Interface**
+
+  * Suggests component alternatives from local (Tunisian) markets
+  * Assesses project difficulty and required skills
+  * Generates step-by-step build instructions
+  * Lists components + estimated costs in TND
+  * Recommends related learning paths or tutorials
+
+* **Additional Features:**
+
+  * Voice input for questions
+  * “Explain this step” contextual help
+  * Personalized learning challenges
+
+---
+
+### 🧩 3. Personal Portfolio
+
+* **My Projects Dashboard**
+
+  * Saved ideas from swipes
+  * Completed builds with photo uploads
+
+* **Progress Visualization**
+
+  * Timeline of completed projects
+  * Skills matrix (coding, electronics, mechanics, CAD)
+  * Level-up XP system and progress bars
+
+* **Achievements**
+
+  * Badges for milestones (“First Prototype,” “Budget Builder,” “Advanced Automation”)
+
+* **Export Feature**
+
+  * Downloadable **PDF portfolio** for internships or job applications
+
+---
+
+### 🌐 4. Community Hub
+
+* **Showcase Zone:**
+  Users share completed projects with photos and notes.
+
+* **Rating & Comments:**
+  Upvote and feedback system to highlight high-quality builds.
+
+* **Mentorship & Collaboration:**
+  Option for experienced users to mentor newcomers.
+
+* **Success Stories:**
+  Featured Tunisian projects and student spotlights.
+
+---
+
+## 5️⃣ Supporting Features
+
+| Feature                              | Description                                                               |
+| -------------------------------- | ---------------------------------------------------------------- |
+| 🌓 Light/Dark Mode        | User can toggle between themes                     |
+| 👤 Authentication        | Email / Google login                               |
+| ⚙️ Admin Dashboard       | Manage users, projects, and community posts        |
+| 💾 Database Scalability  | Firebase or Supabase for flexible project data     |
+| 💬 Language Localization | English, French, and Arabic                        |
+| 🪙 Currency Adaptation   | Prices displayed in **Tunisian Dinar (TND)**       |
+| 🧭 Smooth UX             | Animated swipe transitions, low-latency navigation |
+
+---
+
+## 6️⃣ Design & Aesthetic
+
+### 🎨 Visual Style
+
+**Retro-Futuristic Cyber Core**
+
+* CRT glow, neon highlights, analog controls, and scanline overlays
+* Circuit-inspired patterns, hand-drawn details
+* Balanced between nostalgic tech and sleek futurism
+
+### Color Palette
+
+| Element    | Color          | Hex       |
+| ---------- | -------------- | --------- |
+| Background | Graphite Black | `#1E1E1E` |
+| Highlight  | Neon Cyan      | `#3C8DAD` |
+| Accent     | Crimson Red    | `#A7262A` |
+| Secondary  | Dusty Olive    | `#6B705C` |
+| Text       | Warm Ivory     | `#F5F2E7` |
+
+### Typography
+
+* **Orbitron** → Headers
+* **Monoid** → Code/UI text
+* **IBM Plex Sans** → Body text
+
+---
+
+## 7️⃣ Technical Overview
+
+| Aspect                | Recommendation                          |
+| -------------------| --------------------------------------- |
+| **Frontend**        | React + TailwindCSS                     |
+| **Backend**         | Firebase or Supabase                    |
+| **AI Integration** | OpenAI API or local LLM for assistant   |
+| **Hosting**         | Vercel / Netlify                        |
+| **Scalability**      | Modular schema for projects & users     |
+| **Animations**     | Framer Motion for smooth swipes         |
+| **Performance**    | Lazy loading, caching, optimized images |
+
+---
+
+## 8️⃣ Success Metrics
+
+| Metric                        | Goal           |
+| ------------------------- | -------------- |
+| Average Session Time    | > 5 minutes    |
+| Projects Saved per User | ≥ 10           |
+| Retention Rate          | ≥ 60%          |
+| AI Chat Usage           | ≥ 50% of users |
+| Monthly Project Growth  | +10%           |
+
+---
+
+## 9️⃣ Roadmap
+
+| Phase          | Duration                                     | Deliverables |
+| --------------------------------------------- | -------------------------------------------- | ------------ |
+| **Phase 1 – MVP (3 months)**          | Swipe UI, 100 projects, save/skip, dark mode |              |
+| **Phase 2 – AI Assistant (2 months)** | Chatbot, local part database                 |              |
+| **Phase 3 – Portfolio (2 months)**    | Skill tracking, badges, exportable portfolio |              |
+| **Phase 4 – Community (2 months)**    | Showcase, mentoring, comments                |              |
+| **Phase 5 – Scale & Localization**    | More projects, Arabic version, price updates |              |
+
+---
+
+## 🔥 Summary
+
+**SparkShelf** is a retro-futuristic, swipe-based web app that helps engineering students and robotics enthusiasts discover, plan, and share robotics projects.
+It combines **Tinder-style exploration**, **AI-guided building**, **skill tracking**, and **community sharing**, tailored for the **Tunisian robotics scene**.
+

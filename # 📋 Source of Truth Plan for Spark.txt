@@ -1,0 +1,5194 @@
+# 📋 Source of Truth Plan for SparkShelf
+## [Updated with Admin-Controlled Dataset Management]
+
+---
+## 1️⃣ System Architecture
+
+### Technology Stack (Locked)
+
+```
+Frontend:
+├── Framework: React 18+ with TypeScript
+├── Styling: TailwindCSS + Framer Motion
+├── State Management: Zustand (lightweight, perfect for swipe state)
+├── Routing: React Router v6
+└── Build Tool: Vite
+
+Backend:
+├── BaaS: Supabase (chosen for PostgreSQL + realtime + auth)
+├── Storage: Supabase Storage (project images, user uploads)
+├── Edge Functions: Supabase Functions (AI proxy, webhooks)
+└── Database: PostgreSQL with Row Level Security
+
+AI Integration:
+├── Primary: OpenAI GPT-4o-mini (cost-effective)
+├── Fallback: Claude Sonnet (via Anthropic API)
+└── Proxy Layer: Supabase Edge Function (API key security)
+
+Hosting & Deployment:
+├── Frontend: Vercel (automatic previews + edge functions)
+├── Domain: sparkshelf.tn or sparkshelf.vercel.app
+└── CDN: Vercel Edge Network
+```
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    User Interface                        │
+│  (React + TailwindCSS + Framer Motion)                  │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│              State Management (Zustand)                  │
+│  ├── swipeState  ├── userState  ├── projectState        │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│                   API Layer                              │
+│  ├── Supabase Client  ├── AI Service  ├── Storage       │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│                Supabase Backend                          │
+│  ├── PostgreSQL  ├── Auth  ├── Storage  ├── Realtime    │
+└──────────────────────────────────────────────────────────┘
+```
+
+
+## 2️⃣ Database Schema **[UPDATED FOR ADMIN CONTROL]**
+
+### Core Tables
+
+#### `users`
+```sql
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email TEXT UNIQUE NOT NULL,
+  full_name TEXT,
+  avatar_url TEXT,
+  skill_level TEXT CHECK (skill_level IN ('beginner', 'intermediate', 'advanced')),
+  xp_points INTEGER DEFAULT 0,
+  
+  -- Admin permissions
+  role TEXT DEFAULT 'user' CHECK (role IN ('user', 'admin', 'super_admin')),
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_role ON users(role);
+```
+
+#### `projects` **[ENHANCED FOR ADMIN MANAGEMENT]**
+```sql
+CREATE TABLE projects (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  
+  -- Basic Info
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  thumbnail_url TEXT NOT NULL,
+  detailed_description TEXT, -- Extended content
+  
+  -- Classification
+  difficulty TEXT CHECK (difficulty IN ('beginner', 'intermediate', 'advanced')) NOT NULL,
+  estimated_cost_tnd INTEGER NOT NULL,
+  time_commitment TEXT CHECK (time_commitment IN ('short', 'medium', 'long')) NOT NULL,
+  domain TEXT[] NOT NULL, -- Array: ['mechanical', 'electrical', 'software', 'hybrid', 'aero']
+  tags TEXT[], -- ['arduino', 'iot', 'automation']
+  
+  -- Project Content
+  components JSONB NOT NULL, 
+  /* Structure:
+  [
+    {
+      "name": "Arduino Nano",
+      "quantity": 1,
+      "avg_price_tnd": 25,
+      "local_suppliers": ["CoThings", "Hobbystart"],
+      "notes": "Optional notes"
+    }
+  ]
+  */
+  
+  steps JSONB NOT NULL,
+  /* Structure:
+  [
+    {
+      "step_number": 1,
+      "title": "Gather Components",
+      "description": "Detailed instructions...",
+      "image_url": "optional",
+      "estimated_time_minutes": 15
+    }
+  ]
+  */
+  
+  learning_resources JSONB,
+  /* Structure:
+  [
+    {
+      "type": "video" | "article" | "documentation",
+      "title": "Arduino Basics",
+      "url": "https://...",
+      "description": "Optional"
+    }
+  ]
+  */
+  
+  -- Metadata
+  views_count INTEGER DEFAULT 0,
+  saves_count INTEGER DEFAULT 0,
+  difficulty_score NUMERIC(3,2), -- 1.00 to 5.00 for AI sorting
+  
+  -- Admin controls
+  is_published BOOLEAN DEFAULT FALSE, -- Only published projects appear in feed
+  is_featured BOOLEAN DEFAULT FALSE, -- Featured projects appear first
+  created_by UUID REFERENCES users(id),
+  last_modified_by UUID REFERENCES users(id),
+  
+  -- SEO
+  slug TEXT UNIQUE, -- URL-friendly identifier
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for performance
+CREATE INDEX idx_projects_published ON projects(is_published, is_featured, created_at DESC);
+CREATE INDEX idx_projects_difficulty ON projects(difficulty) WHERE is_published = TRUE;
+CREATE INDEX idx_projects_cost ON projects(estimated_cost_tnd) WHERE is_published = TRUE;
+CREATE INDEX idx_projects_domain ON projects USING GIN(domain) WHERE is_published = TRUE;
+CREATE INDEX idx_projects_tags ON projects USING GIN(tags) WHERE is_published = TRUE;
+CREATE INDEX idx_projects_slug ON projects(slug);
+
+-- Auto-generate slug from title
+CREATE OR REPLACE FUNCTION generate_slug()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.slug IS NULL OR NEW.slug = '' THEN
+    NEW.slug := lower(regexp_replace(NEW.title, '[^a-zA-Z0-9]+', '-', 'g'));
+    NEW.slug := trim(both '-' from NEW.slug);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER set_project_slug
+  BEFORE INSERT OR UPDATE ON projects
+  FOR EACH ROW
+  EXECUTE FUNCTION generate_slug();
+
+-- Auto-update timestamp
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER set_updated_at
+  BEFORE UPDATE ON projects
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at();
+```
+
+#### `project_revisions` **[NEW - VERSION CONTROL]**
+```sql
+CREATE TABLE project_revisions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  
+  -- Snapshot of project data
+  revision_data JSONB NOT NULL, -- Complete project JSON
+  
+  -- Revision metadata
+  revision_number INTEGER NOT NULL,
+  changed_by UUID REFERENCES users(id),
+  change_summary TEXT, -- What was changed
+  
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_project_revisions_project ON project_revisions(project_id, revision_number DESC);
+
+-- Auto-increment revision number
+CREATE OR REPLACE FUNCTION increment_revision_number()
+RETURNS TRIGGER AS $$
+BEGIN
+  SELECT COALESCE(MAX(revision_number), 0) + 1
+  INTO NEW.revision_number
+  FROM project_revisions
+  WHERE project_id = NEW.project_id;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER set_revision_number
+  BEFORE INSERT ON project_revisions
+  FOR EACH ROW
+  EXECUTE FUNCTION increment_revision_number();
+```
+
+#### `project_import_logs` **[NEW - TRACK BULK IMPORTS]**
+```sql
+CREATE TABLE project_import_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  
+  imported_by UUID REFERENCES users(id),
+  file_name TEXT,
+  total_projects INTEGER,
+  successful_imports INTEGER,
+  failed_imports INTEGER,
+  error_log JSONB, -- Array of errors
+  
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### Row Level Security (RLS) Policies **[CRITICAL]**
+
+```sql
+-- Enable RLS on all tables
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_revisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_import_logs ENABLE ROW LEVEL SECURITY;
+
+-- USERS TABLE POLICIES
+CREATE POLICY "Users can view own profile"
+  ON users FOR SELECT
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can update own profile"
+  ON users FOR UPDATE
+  USING (auth.uid() = id);
+
+-- PROJECTS TABLE POLICIES
+
+-- Public read access to published projects
+CREATE POLICY "Anyone can view published projects"
+  ON projects FOR SELECT
+  USING (is_published = TRUE);
+
+-- Admins can view all projects
+CREATE POLICY "Admins can view all projects"
+  ON projects FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('admin', 'super_admin')
+    )
+  );
+
+-- Admins can insert projects
+CREATE POLICY "Admins can insert projects"
+  ON projects FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('admin', 'super_admin')
+    )
+  );
+
+-- Admins can update projects
+CREATE POLICY "Admins can update projects"
+  ON projects FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('admin', 'super_admin')
+    )
+  );
+
+-- Super admins can delete projects
+CREATE POLICY "Super admins can delete projects"
+  ON projects FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role = 'super_admin'
+    )
+  );
+
+-- PROJECT REVISIONS POLICIES
+CREATE POLICY "Admins can view all revisions"
+  ON project_revisions FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('admin', 'super_admin')
+    )
+  );
+
+CREATE POLICY "Admins can insert revisions"
+  ON project_revisions FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('admin', 'super_admin')
+    )
+  );
+
+-- IMPORT LOGS POLICIES
+CREATE POLICY "Admins can view import logs"
+  ON project_import_logs FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('admin', 'super_admin')
+    )
+  );
+```
+
+---
+
+## 3️⃣ API Specifications **[ENHANCED FOR ADMIN]**
+
+### Admin Projects API **[NEW]**
+
+```typescript
+// ============================================
+// ADMIN CRUD OPERATIONS
+// ============================================
+
+// Get all projects (including unpublished) - Admin only
+GET /api/admin/projects
+Query params: {
+  limit: number,
+  offset: number,
+  is_published?: boolean,
+  difficulty?: string,
+  search?: string // Search in title/description
+}
+Response: {
+  projects: Project[],
+  total: number,
+  hasMore: boolean
+}
+
+// Get single project (admin view with all fields)
+GET /api/admin/projects/:id
+Response: {
+  project: Project,
+  revisions: ProjectRevision[], // Version history
+  stats: {
+    views: number,
+    saves: number,
+    completion_rate: number
+  }
+}
+
+// Create new project
+POST /api/admin/projects
+Body: {
+  title: string,
+  description: string,
+  detailed_description?: string,
+  thumbnail_url: string,
+  difficulty: 'beginner' | 'intermediate' | 'advanced',
+  estimated_cost_tnd: number,
+  time_commitment: 'short' | 'medium' | 'long',
+  domain: string[],
+  tags: string[],
+  components: Component[],
+  steps: Step[],
+  learning_resources?: Resource[],
+  is_published: boolean,
+  is_featured: boolean
+}
+Response: {
+  project: Project,
+  success: boolean
+}
+
+// Update existing project
+PATCH /api/admin/projects/:id
+Body: Partial<Project> & {
+  change_summary: string // Required for revision tracking
+}
+Response: {
+  project: Project,
+  revision: ProjectRevision,
+  success: boolean
+}
+
+// Delete project (soft delete - mark as unpublished)
+DELETE /api/admin/projects/:id
+Query params: {
+  permanent?: boolean // Only super_admin can permanently delete
+}
+Response: {
+  success: boolean
+}
+
+// Bulk publish/unpublish
+PATCH /api/admin/projects/bulk-status
+Body: {
+  project_ids: string[],
+  is_published: boolean
+}
+Response: {
+  updated_count: number,
+  success: boolean
+}
+
+// Duplicate project (for quick variations)
+POST /api/admin/projects/:id/duplicate
+Body: {
+  title_suffix?: string // e.g., " - Copy"
+}
+Response: {
+  project: Project,
+  success: boolean
+}
+
+// ============================================
+// BULK IMPORT/EXPORT
+// ============================================
+
+// Import projects from JSON
+POST /api/admin/projects/import
+Body: {
+  projects: ProjectSeed[], // Array of project objects
+  auto_publish: boolean,
+  overwrite_existing: boolean // Match by title or slug
+}
+Response: {
+  import_log: ImportLog,
+  successful: number,
+  failed: number,
+  errors: Array<{
+    project_title: string,
+    error: string
+  }>
+}
+
+// Export all projects as JSON
+GET /api/admin/projects/export
+Query params: {
+  include_unpublished?: boolean,
+  format: 'json' | 'csv'
+}
+Response: File download
+
+// Get import logs
+GET /api/admin/import-logs
+Response: {
+  logs: ImportLog[]
+}
+
+// ============================================
+// REVISION MANAGEMENT
+// ============================================
+
+// Get project revision history
+GET /api/admin/projects/:id/revisions
+Response: {
+  revisions: ProjectRevision[]
+}
+
+// Restore project to specific revision
+POST /api/admin/projects/:id/revisions/:revision_id/restore
+Response: {
+  project: Project,
+  success: boolean
+}
+
+// Compare two revisions
+GET /api/admin/projects/:id/revisions/compare
+Query params: {
+  revision_a: string,
+  revision_b: string
+}
+Response: {
+  differences: object // JSON diff
+}
+```
+
+### Public Projects API **[UPDATED]**
+
+```typescript
+// Get paginated projects for swipe feed (PUBLIC)
+GET /api/projects/feed
+Query params: {
+  limit: number (default: 10),
+  offset: number,
+  difficulty?: 'beginner' | 'intermediate' | 'advanced',
+  max_cost?: number,
+  time_commitment?: 'short' | 'medium' | 'long',
+  domains?: string[]
+}
+Response: {
+  projects: Project[], // Only published projects
+  hasMore: boolean,
+  nextOffset: number
+}
+
+// Get single project details (PUBLIC)
+GET /api/projects/:slug  // Changed from :id to :slug for SEO
+Response: Project
+
+// Increment view count
+POST /api/projects/:id/view
+Response: { success: boolean }
+```
+
+---
+
+## 4️⃣ Frontend Structure **[ENHANCED FOR ADMIN]**
+
+### Project Directory **[UPDATED]**
+```
+sparkshelf/
+├── src/
+│   ├── components/
+│   │   ├── Admin/ **[NEW SECTION]**
+│   │   │   ├── ProjectEditor/
+│   │   │   │   ├── ProjectForm.tsx
+│   │   │   │   ├── ComponentsEditor.tsx
+│   │   │   │   ├── StepsEditor.tsx
+│   │   │   │   ├── MediaUploader.tsx
+│   │   │   │   └── TagsInput.tsx
+│   │   │   ├── ProjectTable/
+│   │   │   │   ├── ProjectsTable.tsx
+│   │   │   │   ├── TableFilters.tsx
+│   │   │   │   ├── BulkActions.tsx
+│   │   │   │   └── QuickPreview.tsx
+│   │   │   ├── Import/
+│   │   │   │   ├── ImportWizard.tsx
+│   │   │   │   ├── JSONValidator.tsx
+│   │   │   │   ├── ImportPreview.tsx
+│   │   │   │   └── ImportProgress.tsx
+│   │   │   ├── Revisions/
+│   │   │   │   ├── RevisionHistory.tsx
+│   │   │   │   ├── RevisionCompare.tsx
+│   │   │   │   └── RestoreConfirm.tsx
+│   │   │   └── Dashboard/
+│   │   │       ├── StatsOverview.tsx
+│   │   │       ├── RecentActivity.tsx
+│   │   │       └── QuickActions.tsx
+│   │   ├── SwipeCard/
+│   │   │   ├── SwipeCard.tsx
+│   │   │   ├── SwipeGesture.tsx
+│   │   │   └── ProjectFilters.tsx
+│   │   ├── AIChat/
+│   │   ├── Portfolio/
+│   │   ├── Community/
+│   │   ├── Resources/
+│   │   └── shared/
+│   ├── pages/
+│   │   ├── Home.tsx
+│   │   ├── Portfolio.tsx
+│   │   ├── AIAssistant.tsx
+│   │   ├── Community.tsx
+│   │   ├── ProjectDetails.tsx
+│   │   ├── Resources.tsx
+│   │   └── admin/ **[NEW]**
+│   │       ├── AdminDashboard.tsx
+│   │       ├── ProjectsList.tsx
+│   │       ├── ProjectEditor.tsx
+│   │       ├── ProjectCreate.tsx
+│   │       ├── ImportProjects.tsx
+│   │       ├── ExportProjects.tsx
+│   │       └── Settings.tsx
+│   ├── stores/
+│   │   ├── useSwipeStore.ts
+│   │   ├── useUserStore.ts
+│   │   ├── useProjectStore.ts
+│   │   ├── useAIStore.ts
+│   │   ├── useResourcesStore.ts
+│   │   └── useAdminStore.ts **[NEW]**
+│   ├── services/
+│   │   ├── supabase.ts
+│   │   ├── ai.service.ts
+│   │   ├── projects.service.ts
+│   │   ├── storage.service.ts
+│   │   ├── resources.service.ts
+│   │   └── admin.service.ts **[NEW]**
+│   ├── hooks/
+│   │   ├── useSwipeGesture.ts
+│   │   ├── useInfiniteScroll.ts
+│   │   ├── useAuth.ts
+│   │   ├── useStoreTracking.ts
+│   │   └── useAdminPermissions.ts **[NEW]**
+│   ├── utils/
+│   │   ├── animations.ts
+│   │   ├── currency.ts
+│   │   ├── analytics.ts
+│   │   ├── validation.ts **[NEW]**
+│   │   └── constants.ts
+│   ├── types/
+│   │   ├── project.types.ts
+│   │   ├── user.types.ts
+│   │   └── admin.types.ts **[NEW]**
+│   └── styles/
+├── public/
+├── supabase/
+│   ├── migrations/
+│   │   ├── 001_initial_schema.sql
+│   │   ├── 002_add_admin_features.sql
+│   │   ├── 003_add_revisions.sql
+│   │   └── seed/
+│   │       ├── users.sql
+│   │       ├── projects.json **[YOUR 25 PROJECTS]**
+│   │       └── stores.sql
+│   └── functions/
+└── package.json
+```
+
+---
+
+## 5️⃣ TypeScript Types **[COMPLETE TYPE DEFINITIONS]**
+
+```typescript
+// ============================================
+// PROJECT TYPES
+// ============================================
+
+export interface Component {
+  name: string;
+  quantity: number;
+  avg_price_tnd: number;
+  local_suppliers: string[];
+  notes?: string;
+}
+
+export interface Step {
+  step_number: number;
+  title: string;
+  description: string;
+  image_url?: string;
+  estimated_time_minutes?: number;
+}
+
+export interface LearningResource {
+  type: 'video' | 'article' | 'documentation';
+  title: string;
+  url: string;
+  description?: string;
+}
+
+export interface Project {
+  id: string;
+  title: string;
+  description: string;
+  detailed_description?: string;
+  thumbnail_url: string;
+  
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  estimated_cost_tnd: number;
+  time_commitment: 'short' | 'medium' | 'long';
+  domain: ('mechanical' | 'electrical' | 'software' | 'hybrid' | 'aero')[];
+  tags: string[];
+  
+  components: Component[];
+  steps: Step[];
+  learning_resources?: LearningResource[];
+  
+  views_count: number;
+  saves_count: number;
+  difficulty_score?: number;
+  
+  is_published: boolean;
+  is_featured: boolean;
+  created_by?: string;
+  last_modified_by?: string;
+  
+  slug: string;
+  
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectSeed extends Omit<Project, 
+  'id' | 'views_count' | 'saves_count' | 'created_by' | 'last_modified_by' | 'created_at' | 'updated_at' | 'slug'
+> {}
+
+export interface ProjectRevision {
+  id: string;
+  project_id: string;
+  revision_data: Project;
+  revision_number: number;
+  changed_by: string;
+  change_summary?: string;
+  created_at: string;
+}
+
+export interface ImportLog {
+  id: string;
+  imported_by: string;
+  file_name: string;
+  total_projects: number;
+  successful_imports: number;
+  failed_imports: number;
+  error_log: Array<{
+    project_title: string;
+    error: string;
+  }>;
+  created_at: string;
+}
+
+// ============================================
+// ADMIN SERVICE TYPES
+// ============================================
+
+export interface CreateProjectDTO {
+  title: string;
+  description: string;
+  detailed_description?: string;
+  thumbnail_url: string;
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  estimated_cost_tnd: number;
+  time_commitment: 'short' | 'medium' | 'long';
+  domain: string[];
+  tags: string[];
+  components: Component[];
+  steps: Step[];
+  learning_resources?: LearningResource[];
+  is_published: boolean;
+  is_featured: boolean;
+}
+
+export interface UpdateProjectDTO extends Partial<CreateProjectDTO> {
+  change_summary: string;
+}
+
+export interface BulkImportDTO {
+  projects: ProjectSeed[];
+  auto_publish: boolean;
+  overwrite_existing: boolean;
+}
+
+export interface BulkStatusUpdateDTO {
+  project_ids: string[];
+  is_published: boolean;
+}
+```
+
+---
+
+## 6️⃣ Admin Service Implementation
+
+```typescript
+// src/services/admin.service.ts
+
+import { supabase } from './supabase';
+import type { 
+  Project, 
+  CreateProjectDTO, 
+  UpdateProjectDTO, 
+  BulkImportDTO,
+  ImportLog 
+} from '../types/project.types';
+
+export class AdminService {
+  // ============================================
+  // PROJECT CRUD
+  // ============================================
+  
+  async getAllProjects(params: {
+    limit?: number;
+    offset?: number;
+    is_published?: boolean;
+    difficulty?: string;
+    search?: string;
+  }) {
+    let query = supabase
+      .from('projects')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false });
+
+    if (params.is_published !== undefined) {
+      query = query.eq('is_published', params.is_published);
+    }
+
+    if (params.difficulty) {
+      query = query.eq('difficulty', params.difficulty);
+    }
+
+    if (params.search) {
+      query = query.or(`title.ilike.%${params.search}%,description.ilike.%${params.search}%`);
+    }
+
+    if (params.limit) {
+      query = query.range(params.offset || 0, (params.offset || 0) + params.limit - 1);
+    }
+
+    const { data, error, count } = await query;
+
+    if (error) throw error;
+
+    return {
+      projects: data as Project[],
+      total: count || 0,
+      hasMore: (count || 0) > (params.offset || 0) + (params.limit || 10)
+    };
+  }
+
+  async getProjectById(id: string) {
+    const { data, error } = await supabase
+      .from('projects')
+      .select(`
+        *,
+        revisions:project_revisions(*)
+      `)
+      .eq('id', id)
+      .single();
+
+    if (error) throw error;
+    return data;
+  }
+
+  async createProject(dto: CreateProjectDTO) {
+    const { data: user } = await supabase.auth.getUser();
+    
+    const { data, error } = await supabase
+      .from('projects')
+      .insert({
+        ...dto,
+        created_by: user.user?.id,
+        last_modified_by: user.user?.id
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create initial revision
+    await this.createRevision(data.id, data, 'Initial creation');
+
+    return data as Project;
+  }
+
+  async updateProject(id: string, dto: UpdateProjectDTO) {
+    const { data: user } = await supabase.auth.getUser();
+    
+    const { change_summary, ...updateData } = dto;
+
+    const { data, error } = await supabase
+      .from('projects')
+      .update({
+        ...updateData,
+        last_modified_by: user.user?.id
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create revision
+    await this.createRevision(id, data, change_summary);
+
+    return data as Project;
+  }
+
+  async deleteProject(id: string, permanent: boolean = false) {
+    if (permanent) {
+      // Permanent delete (super admin only)
+      const { error } = await supabase
+        .from('projects')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+    } else {
+      // Soft delete - just unpublish
+      await this.updateProject(id, { 
+        is_published: false,
+        change_summary: 'Project unpublished'
+      });
+    }
+
+    return { success: true };
+  }
+
+  async duplicateProject(id: string, titleSuffix: string = ' - Copy') {
+    const original = await this.getProjectById(id);
+    
+    const { id: _, slug: __, created_at: ___, updated_at: ____, ...projectData } = original;
+
+    const newProject = await this.createProject({
+      ...projectData,
+      title: `${original.title}${titleSuffix}`,
+      is_published: false // Duplicates start as drafts
+    });
+
+    return newProject;
+  }
+
+  // ============================================
+  // BULK OPERATIONS
+  // ============================================
+
+  async bulkUpdateStatus(dto: BulkStatusUpdateDTO) {
+    const { data, error } = await supabase
+      .from('projects')
+      .update({ is_published: dto.is_published })
+      .in('id', dto.project_ids)
+      .select();
+
+    if (error) throw error;
+
+    return {
+      updated_count: data.length,
+      success: true
+    };
+  }
+
+  async bulkImport(dto: BulkImportDTO): Promise<ImportLog> {
+    const { data: user } = await supabase.auth.getUser();
+    const errors: Array<{ project_title: string; error: string }> = [];
+    let successful = 0;
+
+    for (const projectSeed of dto.projects) {
+      try {
+        // Check if project exists (by title or slug)
+        if (dto.overwrite_existing) {
+          const { data: existing } = await supabase
+            .from('projects')
+            .select('id')
+            .eq('title', projectSeed.title)
+            .single();
+
+          if (existing) {
+            // Update existing
+            await this.updateProject(existing.id, {
+              ...projectSeed,
+              is_published: dto.auto_publish,
+              change_summary: 'Bulk import update'
+            });
+            successful++;
+            continue;
+          }
+        }
+
+        // Create new project
+        await this.createProject({
+          ...projectSeed,
+          is_published: dto.auto_publish
+        });
+        successful++;
+      } catch (error) {
+        errors.push({
+          project_title: projectSeed.title,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    }
+
+    // Log the import
+    const { data: log } = await supabase
+      .from('project_import_logs')
+      .insert({
+        imported_by: user.user?.id,
+        file_name: 'bulk_import.json',
+        total_projects: dto.projects.length,
+        successful_imports: successful,
+        failed_imports: errors.length,
+        error_log: errors
+      })
+      .select()
+      .single();
+
+    return log as ImportLog;
+  }
+
+  async exportProjects(includeUnpublished: boolean = false) {
+    let query = supabase.from('projects').select('*');
+
+    if (!includeUnpublished) {
+      query = query.eq('is_published', true);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    // Return as JSON string for download
+    return JSON.stringify(data, null, 2);
+  }
+
+  // ============================================
+  // REVISION MANAGEMENT
+  // ============================================
+
+  private async createRevision(projectId: string, projectData: any, changeSummary: string) {
+    const { data: user } = await supabase.auth.getUser();
+
+    const { error } = await supabase
+      .from('project_revisions')
+      .insert({
+        project_id: projectId,
+        revision_data: projectData,
+        changed_by: user.user?.id,
+        change_summary: changeSummary
+      });
+
+    if (error) throw error;
+  }
+
+  async getRevisions(projectId: string) {
+    const { data, error } = await supabase
+      .from('project_revisions')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('revision_number', { ascending: false });
+
+    if (error) throw error;
+    return data;
+  }
+
+  async restoreRevision(projectId: string, revisionId: string) {
+    // Get the revision
+    const { data: revision, error: revError } = await supabase
+      .from('project_revisions')
+      .select('revision_data')
+      .eq('id', revisionId)
+      .single();
+
+    if (revError) throw revError;
+
+    // Update project with revision data
+    const { id, created_at, updated_at, ...restoreData } = revision.revision_data;
+
+    return this.updateProject(projectId, {
+      ...restoreData,
+      change_summary: `Restored to revision #${revision.revision_data.revision_number}`
+    });
+  }
+
+  // ============================================
+  // STATISTICS
+  // ============================================
+
+  async getProjectStats(projectId: string) {
+    // Get views, saves, completion rate
+    const { data: project } = await supabase
+      .from('projects')
+      .select('views_count, saves_count')
+      .eq('id', projectId)
+      .single();
+
+    const { count: completions } = await supabase
+      .from('user_projects')
+      .select('*', { count: 'exact', head: true })
+      .eq('project_id', projectId)
+      .eq('status', 'completed');
+
+    const { count: saves } = await supabase
+      .from('user_projects')
+      .select('*', { count: 'exact', head: true })
+      .eq('project_id', projectId);
+
+    return {
+      views: project?.views_count || 0,
+      saves: project?.saves_count || 0,
+      completions: completions || 0,
+      completion_rate: saves ? ((completions || 0) / saves) * 100 : 0
+    };
+  }
+}
+
+export const adminService = new AdminService();
+```
+
+---
+## 7️⃣ Admin Dashboard Components **[IMPLEMENTATION]**
+
+### ProjectEditor Component
+
+```typescript
+// src/components/Admin/ProjectEditor/ProjectForm.tsx
+
+import React, { useState } from 'react';
+import { useForm } from 'react-hook-form';
+import { adminService } from '@/services/admin.service';
+import type { CreateProjectDTO, Project } from '@/types/project.types';
+import { ComponentsEditor } from './ComponentsEditor';
+import { StepsEditor } from './StepsEditor';
+import { MediaUploader } from './MediaUploader';
+import { TagsInput } from './TagsInput';
+
+interface ProjectFormProps {
+  project?: Project; // If editing existing project
+  onSuccess: (project: Project) => void;
+  onCancel: () => void;
+}
+
+export const ProjectForm: React.FC<ProjectFormProps> = ({ 
+  project, 
+  onSuccess, 
+  onCancel 
+}) => {
+  const [activeTab, setActiveTab] = useState<'basic' | 'components' | 'steps' | 'resources'>('basic');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<CreateProjectDTO>({
+    defaultValues: project ? {
+      title: project.title,
+      description: project.description,
+      detailed_description: project.detailed_description,
+      thumbnail_url: project.thumbnail_url,
+      difficulty: project.difficulty,
+      estimated_cost_tnd: project.estimated_cost_tnd,
+      time_commitment: project.time_commitment,
+      domain: project.domain,
+      tags: project.tags,
+      components: project.components,
+      steps: project.steps,
+      learning_resources: project.learning_resources,
+      is_published: project.is_published,
+      is_featured: project.is_featured
+    } : {
+      difficulty: 'beginner',
+      time_commitment: 'short',
+      domain: [],
+      tags: [],
+      components: [],
+      steps: [],
+      is_published: false,
+      is_featured: false
+    }
+  });
+
+  const onSubmit = async (data: CreateProjectDTO) => {
+    setIsSubmitting(true);
+    try {
+      let result: Project;
+      
+      if (project) {
+        // Update existing
+        result = await adminService.updateProject(project.id, {
+          ...data,
+          change_summary: 'Manual edit via admin panel'
+        });
+      } else {
+        // Create new
+        result = await adminService.createProject(data);
+      }
+
+      onSuccess(result);
+    } catch (error) {
+      console.error('Failed to save project:', error);
+      alert('Failed to save project. Check console for details.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+      {/* Tab Navigation */}
+      <div className="flex space-x-4 border-b border-gray-700">
+        {['basic', 'components', 'steps', 'resources'].map(tab => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setActiveTab(tab as any)}
+            className={`px-4 py-2 font-mono uppercase text-sm transition-colors ${
+              activeTab === tab 
+                ? 'text-primary border-b-2 border-primary' 
+                : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {/* Basic Info Tab */}
+      {activeTab === 'basic' && (
+        <div className="space-y-4">
+          {/* Title */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Project Title *
+            </label>
+            <input
+              {...register('title', { required: 'Title is required' })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+              placeholder="LED Matrix Clock"
+            />
+            {errors.title && (
+              <p className="text-red-500 text-sm mt-1">{errors.title.message}</p>
+            )}
+          </div>
+
+          {/* Short Description */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Short Description *
+            </label>
+            <textarea
+              {...register('description', { required: 'Description is required' })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+              rows={3}
+              placeholder="A simple clock using 8x8 LED matrix and RTC module"
+            />
+            {errors.description && (
+              <p className="text-red-500 text-sm mt-1">{errors.description.message}</p>
+            )}
+          </div>
+
+          {/* Detailed Description */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Detailed Description
+            </label>
+            <textarea
+              {...register('detailed_description')}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+              rows={6}
+              placeholder="Extended project description, learning outcomes, use cases..."
+            />
+          </div>
+
+          {/* Thumbnail Upload */}
+          <MediaUploader
+            label="Project Thumbnail *"
+            currentUrl={watch('thumbnail_url')}
+            onUpload={(url) => setValue('thumbnail_url', url)}
+            accept="image/*"
+          />
+          {errors.thumbnail_url && (
+            <p className="text-red-500 text-sm">{errors.thumbnail_url.message}</p>
+          )}
+
+          {/* Difficulty */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Difficulty Level *
+            </label>
+            <select
+              {...register('difficulty', { required: true })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+            >
+              <option value="beginner">Beginner</option>
+              <option value="intermediate">Intermediate</option>
+              <option value="advanced">Advanced</option>
+            </select>
+          </div>
+
+          {/* Cost */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Estimated Cost (TND) *
+            </label>
+            <input
+              type="number"
+              {...register('estimated_cost_tnd', { 
+                required: 'Cost is required',
+                min: { value: 0, message: 'Cost must be positive' }
+              })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+              placeholder="85"
+            />
+            {errors.estimated_cost_tnd && (
+              <p className="text-red-500 text-sm mt-1">{errors.estimated_cost_tnd.message}</p>
+            )}
+          </div>
+
+          {/* Time Commitment */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Time Commitment *
+            </label>
+            <select
+              {...register('time_commitment', { required: true })}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+            >
+              <option value="short">Short (&lt; 1 week)</option>
+              <option value="medium">Medium (1-3 weeks)</option>
+              <option value="long">Long (3+ weeks)</option>
+            </select>
+          </div>
+
+          {/* Domain (Multi-select) */}
+          <div>
+            <label className="block text-sm font-mono text-gray-300 mb-2">
+              Domains * (Select all that apply)
+            </label>
+            <div className="space-y-2">
+              {['mechanical', 'electrical', 'software', 'hybrid', 'aero'].map(domain => (
+                <label key={domain} className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    value={domain}
+                    {...register('domain', { required: 'Select at least one domain' })}
+                    className="w-4 h-4"
+                  />
+                  <span className="text-gray-300 capitalize">{domain}</span>
+                </label>
+              ))}
+            </div>
+            {errors.domain && (
+              <p className="text-red-500 text-sm mt-1">{errors.domain.message}</p>
+            )}
+          </div>
+
+          {/* Tags */}
+          <TagsInput
+            label="Tags"
+            tags={watch('tags') || []}
+            onChange={(tags) => setValue('tags', tags)}
+          />
+
+          {/* Publishing Options */}
+          <div className="space-y-2 pt-4 border-t border-gray-700">
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                {...register('is_published')}
+                className="w-4 h-4"
+              />
+              <span className="text-gray-300">Publish immediately</span>
+            </label>
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                {...register('is_featured')}
+                className="w-4 h-4"
+              />
+              <span className="text-gray-300">Feature this project</span>
+            </label>
+          </div>
+        </div>
+      )}
+
+      {/* Components Tab */}
+      {activeTab === 'components' && (
+        <ComponentsEditor
+          components={watch('components') || []}
+          onChange={(components) => setValue('components', components)}
+        />
+      )}
+
+      {/* Steps Tab */}
+      {activeTab === 'steps' && (
+        <StepsEditor
+          steps={watch('steps') || []}
+          onChange={(steps) => setValue('steps', steps)}
+        />
+      )}
+
+      {/* Resources Tab */}
+      {activeTab === 'resources' && (
+        <div className="space-y-4">
+          <p className="text-gray-400 text-sm">
+            Add learning resources like tutorials, videos, or documentation
+          </p>
+          {/* Resources editor implementation */}
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="flex justify-end space-x-4 pt-6 border-t border-gray-700">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white transition-colors"
+          disabled={isSubmitting}
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          className="px-6 py-2 bg-primary hover:bg-primary/80 rounded text-white transition-colors disabled:opacity-50"
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? 'Saving...' : project ? 'Update Project' : 'Create Project'}
+        </button>
+      </div>
+    </form>
+  );
+};
+```
+
+### ComponentsEditor Component
+
+```typescript
+// src/components/Admin/ProjectEditor/ComponentsEditor.tsx
+
+import React, { useState } from 'react';
+import type { Component } from '@/types/project.types';
+
+interface ComponentsEditorProps {
+  components: Component[];
+  onChange: (components: Component[]) => void;
+}
+
+export const ComponentsEditor: React.FC<ComponentsEditorProps> = ({ 
+  components, 
+  onChange 
+}) => {
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+
+  const addComponent = () => {
+    onChange([
+      ...components,
+      {
+        name: '',
+        quantity: 1,
+        avg_price_tnd: 0,
+        local_suppliers: [],
+        notes: ''
+      }
+    ]);
+    setEditingIndex(components.length);
+  };
+
+  const updateComponent = (index: number, field: keyof Component, value: any) => {
+    const updated = [...components];
+    updated[index] = { ...updated[index], [field]: value };
+    onChange(updated);
+  };
+
+  const deleteComponent = (index: number) => {
+    onChange(components.filter((_, i) => i !== index));
+  };
+
+  const moveComponent = (index: number, direction: 'up' | 'down') => {
+    const newIndex = direction === 'up' ? index - 1 : index + 1;
+    if (newIndex < 0 || newIndex >= components.length) return;
+
+    const updated = [...components];
+    [updated[index], updated[newIndex]] = [updated[newIndex], updated[index]];
+    onChange(updated);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-mono text-primary">Components List</h3>
+        <button
+          type="button"
+          onClick={addComponent}
+          className="px-4 py-2 bg-primary hover:bg-primary/80 rounded text-white transition-colors text-sm"
+        >
+          + Add Component
+        </button>
+      </div>
+
+      {components.length === 0 && (
+        <div className="text-center py-12 text-gray-500 border-2 border-dashed border-gray-700 rounded">
+          No components added yet. Click "Add Component" to start.
+        </div>
+      )}
+
+      {components.map((component, index) => (
+        <div 
+          key={index} 
+          className="bg-gray-800 border border-gray-700 rounded p-4 space-y-3"
+        >
+          <div className="flex justify-between items-start">
+            <span className="text-sm font-mono text-gray-400">#{index + 1}</span>
+            <div className="flex space-x-2">
+              <button
+                type="button"
+                onClick={() => moveComponent(index, 'up')}
+                disabled={index === 0}
+                className="text-gray-400 hover:text-white disabled:opacity-30"
+                title="Move up"
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                onClick={() => moveComponent(index, 'down')}
+                disabled={index === components.length - 1}
+                className="text-gray-400 hover:text-white disabled:opacity-30"
+                title="Move down"
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteComponent(index)}
+                className="text-red-500 hover:text-red-400"
+                title="Delete"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Component Name */}
+          <input
+            type="text"
+            value={component.name}
+            onChange={(e) => updateComponent(index, 'name', e.target.value)}
+            placeholder="Component name (e.g., Arduino Nano)"
+            className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+          />
+
+          <div className="grid grid-cols-2 gap-3">
+            {/* Quantity */}
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Quantity</label>
+              <input
+                type="number"
+                min="1"
+                value={component.quantity}
+                onChange={(e) => updateComponent(index, 'quantity', parseInt(e.target.value))}
+                className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+              />
+            </div>
+
+            {/* Price */}
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Price (TND)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={component.avg_price_tnd}
+                onChange={(e) => updateComponent(index, 'avg_price_tnd', parseFloat(e.target.value))}
+                className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Suppliers (Comma-separated) */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Local Suppliers (comma-separated)
+            </label>
+            <input
+              type="text"
+              value={component.local_suppliers.join(', ')}
+              onChange={(e) => updateComponent(
+                index, 
+                'local_suppliers', 
+                e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+              )}
+              placeholder="CoThings, Hobbystart, Souilah Electronique"
+              className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+            />
+          </div>
+
+          {/* Notes */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Notes (optional)</label>
+            <textarea
+              value={component.notes || ''}
+              onChange={(e) => updateComponent(index, 'notes', e.target.value)}
+              placeholder="Additional notes about this component..."
+              rows={2}
+              className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+            />
+          </div>
+        </div>
+      ))}
+
+      {components.length > 0 && (
+        <div className="text-sm text-gray-400">
+          Total components: {components.length} • 
+          Total estimated cost: {components.reduce((sum, c) => sum + (c.avg_price_tnd * c.quantity), 0).toFixed(2)} TND
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+### StepsEditor Component
+
+```typescript
+// src/components/Admin/ProjectEditor/StepsEditor.tsx
+
+import React from 'react';
+import type { Step } from '@/types/project.types';
+import { MediaUploader } from './MediaUploader';
+
+interface StepsEditorProps {
+  steps: Step[];
+  onChange: (steps: Step[]) => void;
+}
+
+export const StepsEditor: React.FC<StepsEditorProps> = ({ steps, onChange }) => {
+  const addStep = () => {
+    onChange([
+      ...steps,
+      {
+        step_number: steps.length + 1,
+        title: '',
+        description: '',
+        image_url: '',
+        estimated_time_minutes: 0
+      }
+    ]);
+  };
+
+  const updateStep = (index: number, field: keyof Step, value: any) => {
+    const updated = [...steps];
+    updated[index] = { ...updated[index], [field]: value };
+    onChange(updated);
+  };
+
+  const deleteStep = (index: number) => {
+    const updated = steps.filter((_, i) => i !== index);
+    // Renumber steps
+    updated.forEach((step, i) => {
+      step.step_number = i + 1;
+    });
+    onChange(updated);
+  };
+
+  const moveStep = (index: number, direction: 'up' | 'down') => {
+    const newIndex = direction === 'up' ? index - 1 : index + 1;
+    if (newIndex < 0 || newIndex >= steps.length) return;
+
+    const updated = [...steps];
+    [updated[index], updated[newIndex]] = [updated[newIndex], updated[index]];
+    
+    // Renumber
+    updated.forEach((step, i) => {
+      step.step_number = i + 1;
+    });
+    
+    onChange(updated);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-mono text-primary">Build Steps</h3>
+        <button
+          type="button"
+          onClick={addStep}
+          className="px-4 py-2 bg-primary hover:bg-primary/80 rounded text-white transition-colors text-sm"
+        >
+          + Add Step
+        </button>
+      </div>
+
+      {steps.length === 0 && (
+        <div className="text-center py-12 text-gray-500 border-2 border-dashed border-gray-700 rounded">
+          No steps added yet. Click "Add Step" to start.
+        </div>
+      )}
+
+      {steps.map((step, index) => (
+        <div 
+          key={index} 
+          className="bg-gray-800 border border-gray-700 rounded p-4 space-y-3"
+        >
+          <div className="flex justify-between items-start">
+            <div className="flex items-center space-x-3">
+              <span className="text-2xl font-mono text-primary">
+                {step.step_number}
+              </span>
+              <span className="text-sm text-gray-400">of {steps.length}</span>
+            </div>
+            <div className="flex space-x-2">
+              <button
+                type="button"
+                onClick={() => moveStep(index, 'up')}
+                disabled={index === 0}
+                className="text-gray-400 hover:text-white disabled:opacity-30"
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                onClick={() => moveStep(index, 'down')}
+                disabled={index === steps.length - 1}
+                className="text-gray-400 hover:text-white disabled:opacity-30"
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteStep(index)}
+                className="text-red-500 hover:text-red-400"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Step Title */}
+          <input
+            type="text"
+            value={step.title}
+            onChange={(e) => updateStep(index, 'title', e.target.value)}
+            placeholder="Step title (e.g., Assemble the circuit)"
+            className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none font-medium"
+          />
+
+          {/* Step Description */}
+          <textarea
+            value={step.description}
+            onChange={(e) => updateStep(index, 'description', e.target.value)}
+            placeholder="Detailed instructions for this step..."
+            rows={4}
+            className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+          />
+
+          {/* Step Image */}
+          <MediaUploader
+            label="Step Image (optional)"
+            currentUrl={step.image_url}
+            onUpload={(url) => updateStep(index, 'image_url', url)}
+            accept="image/*"
+          />
+
+          {/* Estimated Time */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Estimated Time (minutes)
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={step.estimated_time_minutes || 0}
+              onChange={(e) => updateStep(index, 'estimated_time_minutes', parseInt(e.target.value))}
+              className="w-32 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:border-primary focus:outline-none"
+            />
+          </div>
+        </div>
+      ))}
+
+      {steps.length > 0 && (
+        <div className="text-sm text-gray-400">
+          Total steps: {steps.length} • 
+          Total estimated time: {steps.reduce((sum, s) => sum + (s.estimated_time_minutes || 0), 0)} minutes
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+### MediaUploader Component
+
+```typescript
+// src/components/Admin/ProjectEditor/MediaUploader.tsx
+
+import React, { useState } from 'react';
+import { supabase } from '@/services/supabase';
+
+interface MediaUploaderProps {
+  label: string;
+  currentUrl?: string;
+  onUpload: (url: string) => void;
+  accept?: string;
+}
+
+export const MediaUploader: React.FC<MediaUploaderProps> = ({
+  label,
+  currentUrl,
+  onUpload,
+  accept = 'image/*'
+}) => {
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setProgress(0);
+
+    try {
+      // Generate unique filename
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Math.random().toString(36).substring(2)}-${Date.now()}.${fileExt}`;
+      const filePath = `projects/${fileName}`;
+
+      // Upload to Supabase Storage
+      const { data, error } = await supabase.storage
+        .from('media')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: false
+        });
+
+      if (error) throw error;
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('media')
+        .getPublicUrl(filePath);
+
+      onUpload(publicUrl);
+      setProgress(100);
+    } catch (error) {
+      console.error('Upload failed:', error);
+      alert('Upload failed. Please try again.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-mono text-gray-300 mb-2">
+        {label}
+      </label>
+
+      {currentUrl && (
+        <div className="mb-3 relative">
+          <img 
+            src={currentUrl} 
+            alt="Preview" 
+            className="w-full max-w-md h-48 object-cover rounded border border-gray-700"
+          />
+          <button
+            type="button"
+            onClick={() => onUpload('')}
+            className="absolute top-2 right-2 bg-red-600 hover:bg-red-700 text-white rounded-full w-8 h-8 flex items-center justify-center"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="relative">
+        <input
+          type="file"
+          accept={accept}
+          onChange={handleUpload}
+          disabled={uploading}
+          className="block w-full text-sm text-gray-400
+            file:mr-4 file:py-2 file:px-4
+            file:rounded file:border-0
+            file:text-sm file:font-mono
+            file:bg-primary file:text-white
+            hover:file:bg-primary/80
+            file:cursor-pointer
+            disabled:opacity-50"
+        />
+        
+        {uploading && (
+          <div className="mt-2">
+            <div className="w-full bg-gray-700 rounded-full h-2">
+              <div 
+                className="bg-primary h-2 rounded-full transition-all duration-300"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <p className="text-xs text-gray-400 mt-1">Uploading... {progress}%</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+```
+
+### TagsInput Component
+
+```typescript
+// src/components/Admin/ProjectEditor/TagsInput.tsx
+
+import React, { useState } from 'react';
+
+interface TagsInputProps {
+  label: string;
+  tags: string[];
+  onChange: (tags: string[]) => void;
+}
+
+export const TagsInput: React.FC<TagsInputProps> = ({ label, tags, onChange }) => {
+  const [inputValue, setInputValue] = useState('');
+
+  const addTag = () => {
+    const trimmed = inputValue.trim().toLowerCase();
+    if (trimmed && !tags.includes(trimmed)) {
+      onChange([...tags, trimmed]);
+      setInputValue('');
+    }
+  };
+
+  const removeTag = (tagToRemove: string) => {
+    onChange(tags.filter(tag => tag !== tagToRemove));
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addTag();
+    }
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-mono text-gray-300 mb-2">
+        {label}
+      </label>
+
+      {/* Tags Display */}
+      <div className="flex flex-wrap gap-2 mb-3">
+        {tags.map(tag => (
+          <span
+            key={tag}
+            className="inline-flex items-center space-x-2 px-3 py-1 bg-primary/20 border border-primary/50 rounded-full text-sm text-primary"
+          >
+            <span>{tag}</span>
+            <button
+              type="button"
+              onClick={() => removeTag(tag)}
+              className="hover:text-white"
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+      </div>
+
+      {/* Input */}
+      <div className="flex space-x-2">
+        <input
+          type="text"
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Type a tag and press Enter"
+          className="flex-1 bg-gray-800 border border-gray-700 rounded px-4 py-2 text-white focus:border-primary focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={addTag}
+          className="px-4 py-2 bg-primary hover:bg-primary/80 rounded text-white transition-colors"
+        >
+          Add
+        </button>
+      </div>
+
+      <p className="text-xs text-gray-500 mt-2">
+        Suggested: arduino, iot, sensors, motors, automation, 3d-printing, robotics
+      </p>
+    </div>
+  );
+};
+```
+
+---
+
+## 8️⃣ Bulk Import Component **[JSON IMPORT]**
+
+```typescript
+// src/components/Admin/Import/ImportWizard.tsx
+
+import React, { useState } from 'react';
+import { adminService } from '@/services/admin.service';
+import type { ProjectSeed } from '@/types/project.types';
+import { JSONValidator } from './JSONValidator';
+import { ImportPreview } from './ImportPreview';
+
+export const ImportWizard: React.FC = () => {
+  const [step, setStep] = useState<'upload' | 'validate' | 'preview' | 'importing' | 'complete
+```typescript
+>('upload');
+  const [jsonData, setJsonData] = useState<ProjectSeed[]>([]);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [importSettings, setImportSettings] = useState({
+    auto_publish: false,
+    overwrite_existing: false
+  });
+  const [importResult, setImportResult] = useState<any>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        const projects = Array.isArray(json) ? json : [json];
+        
+        setJsonData(projects);
+        setStep('validate');
+      } catch (error) {
+        alert('Invalid JSON file. Please check the format.');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handlePasteJSON = (jsonText: string) => {
+    try {
+      const json = JSON.parse(jsonText);
+      const projects = Array.isArray(json) ? json : [json];
+      
+      setJsonData(projects);
+      setStep('validate');
+    } catch (error) {
+      alert('Invalid JSON. Please check the format.');
+    }
+  };
+
+  const validateAndProceed = () => {
+    const errors: string[] = [];
+
+    jsonData.forEach((project, index) => {
+      // Required fields validation
+      if (!project.title) errors.push(`Project ${index + 1}: Missing title`);
+      if (!project.description) errors.push(`Project ${index + 1}: Missing description`);
+      if (!project.thumbnail_url) errors.push(`Project ${index + 1}: Missing thumbnail_url`);
+      if (!project.difficulty) errors.push(`Project ${index + 1}: Missing difficulty`);
+      if (project.estimated_cost_tnd === undefined) errors.push(`Project ${index + 1}: Missing estimated_cost_tnd`);
+      if (!project.time_commitment) errors.push(`Project ${index + 1}: Missing time_commitment`);
+      if (!project.domain || project.domain.length === 0) errors.push(`Project ${index + 1}: Missing domain`);
+      if (!project.components || project.components.length === 0) errors.push(`Project ${index + 1}: Missing components`);
+      if (!project.steps || project.steps.length === 0) errors.push(`Project ${index + 1}: Missing steps`);
+
+      // Value validation
+      if (project.difficulty && !['beginner', 'intermediate', 'advanced'].includes(project.difficulty)) {
+        errors.push(`Project ${index + 1}: Invalid difficulty value`);
+      }
+      if (project.time_commitment && !['short', 'medium', 'long'].includes(project.time_commitment)) {
+        errors.push(`Project ${index + 1}: Invalid time_commitment value`);
+      }
+    });
+
+    setValidationErrors(errors);
+
+    if (errors.length === 0) {
+      setStep('preview');
+    }
+  };
+
+  const executeImport = async () => {
+    setStep('importing');
+
+    try {
+      const result = await adminService.bulkImport({
+        projects: jsonData,
+        auto_publish: importSettings.auto_publish,
+        overwrite_existing: importSettings.overwrite_existing
+      });
+
+      setImportResult(result);
+      setStep('complete');
+    } catch (error) {
+      console.error('Import failed:', error);
+      alert('Import failed. Check console for details.');
+      setStep('preview');
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto">
+      {/* Progress Indicator */}
+      <div className="mb-8">
+        <div className="flex items-center justify-between">
+          {['upload', 'validate', 'preview', 'complete'].map((s, i) => (
+            <React.Fragment key={s}>
+              <div className={`flex items-center ${
+                step === s ? 'text-primary' : 
+                ['validate', 'preview', 'complete'].indexOf(step) > i ? 'text-green-500' : 'text-gray-500'
+              }`}>
+                <div className={`w-8 h-8 rounded-full border-2 flex items-center justify-center font-mono text-sm ${
+                  step === s ? 'border-primary bg-primary/20' :
+                  ['validate', 'preview', 'complete'].indexOf(step) > i ? 'border-green-500 bg-green-500/20' : 'border-gray-600'
+                }`}>
+                  {i + 1}
+                </div>
+                <span className="ml-2 text-sm font-mono uppercase">{s}</span>
+              </div>
+              {i < 3 && <div className="flex-1 h-0.5 bg-gray-700 mx-4" />}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+
+      {/* Step 1: Upload */}
+      {step === 'upload' && (
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 space-y-6">
+          <div>
+            <h2 className="text-2xl font-display text-primary mb-2">Import Projects</h2>
+            <p className="text-gray-400">Upload a JSON file or paste JSON data containing your projects</p>
+          </div>
+
+          {/* File Upload */}
+          <div className="space-y-4">
+            <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center hover:border-primary transition-colors">
+              <input
+                type="file"
+                accept=".json"
+                onChange={handleFileUpload}
+                className="hidden"
+                id="file-upload"
+              />
+              <label htmlFor="file-upload" className="cursor-pointer">
+                <div className="text-4xl mb-4">📁</div>
+                <p className="text-gray-300 mb-2">Click to upload JSON file</p>
+                <p className="text-sm text-gray-500">or drag and drop</p>
+              </label>
+            </div>
+
+            <div className="text-center text-gray-500 font-mono">OR</div>
+
+            {/* Paste JSON */}
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">Paste JSON Data</label>
+              <textarea
+                placeholder='[{"title": "Project Name", "description": "...", ...}]'
+                rows={10}
+                className="w-full bg-gray-900 border border-gray-600 rounded px-4 py-3 text-white font-mono text-sm focus:border-primary focus:outline-none"
+                onChange={(e) => {
+                  if (e.target.value.trim()) {
+                    handlePasteJSON(e.target.value);
+                  }
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Sample JSON Link */}
+          <div className="bg-gray-900 border border-gray-700 rounded p-4">
+            <p className="text-sm text-gray-400 mb-2">Need help? Download sample JSON format:</p>
+            
+              href="/sample-projects.json"
+              download
+              className="text-primary hover:text-primary/80 text-sm font-mono underline"
+            >
+              sample-projects.json
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2: Validate */}
+      {step === 'validate' && (
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 space-y-6">
+          <div>
+            <h2 className="text-2xl font-display text-primary mb-2">Validation</h2>
+            <p className="text-gray-400">Checking {jsonData.length} projects for errors...</p>
+          </div>
+
+          <JSONValidator 
+            projects={jsonData} 
+            errors={validationErrors}
+          />
+
+          <div className="flex justify-between">
+            <button
+              onClick={() => setStep('upload')}
+              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white transition-colors"
+            >
+              Back
+            </button>
+            <button
+              onClick={validateAndProceed}
+              className="px-6 py-2 bg-primary hover:bg-primary/80 rounded text-white transition-colors"
+            >
+              Validate & Continue
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 3: Preview */}
+      {step === 'preview' && (
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 space-y-6">
+          <div>
+            <h2 className="text-2xl font-display text-primary mb-2">Preview & Settings</h2>
+            <p className="text-gray-400">Review projects before importing</p>
+          </div>
+
+          {/* Import Settings */}
+          <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-3">
+            <h3 className="font-mono text-sm text-gray-400 uppercase">Import Settings</h3>
+            
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={importSettings.auto_publish}
+                onChange={(e) => setImportSettings({
+                  ...importSettings,
+                  auto_publish: e.target.checked
+                })}
+                className="w-4 h-4"
+              />
+              <div>
+                <span className="text-white">Auto-publish projects</span>
+                <p className="text-sm text-gray-500">Projects will be visible immediately</p>
+              </div>
+            </label>
+
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={importSettings.overwrite_existing}
+                onChange={(e) => setImportSettings({
+                  ...importSettings,
+                  overwrite_existing: e.target.checked
+                })}
+                className="w-4 h-4"
+              />
+              <div>
+                <span className="text-white">Overwrite existing projects</span>
+                <p className="text-sm text-gray-500">Update projects with matching titles</p>
+              </div>
+            </label>
+          </div>
+
+          {/* Preview List */}
+          <ImportPreview projects={jsonData} />
+
+          <div className="flex justify-between">
+            <button
+              onClick={() => setStep('validate')}
+              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white transition-colors"
+            >
+              Back
+            </button>
+            <button
+              onClick={executeImport}
+              className="px-6 py-2 bg-green-600 hover:bg-green-700 rounded text-white transition-colors"
+            >
+              Import {jsonData.length} Projects
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 4: Importing */}
+      {step === 'importing' && (
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-600 border-t-primary mx-auto mb-4" />
+            <h2 className="text-xl font-display text-primary mb-2">Importing Projects...</h2>
+            <p className="text-gray-400">Please wait, this may take a moment</p>
+          </div>
+        </div>
+      )}
+
+      {/* Step 5: Complete */}
+      {step === 'complete' && importResult && (
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 space-y-6">
+          <div className="text-center">
+            <div className="text-6xl mb-4">✅</div>
+            <h2 className="text-2xl font-display text-green-500 mb-2">Import Complete!</h2>
+          </div>
+
+          {/* Results Summary */}
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-gray-900 border border-gray-700 rounded p-4 text-center">
+              <div className="text-3xl font-display text-primary">{importResult.total_projects}</div>
+              <div className="text-sm text-gray-400 mt-1">Total</div>
+            </div>
+            <div className="bg-gray-900 border border-green-900 rounded p-4 text-center">
+              <div className="text-3xl font-display text-green-500">{importResult.successful_imports}</div>
+              <div className="text-sm text-gray-400 mt-1">Successful</div>
+            </div>
+            <div className="bg-gray-900 border border-red-900 rounded p-4 text-center">
+              <div className="text-3xl font-display text-red-500">{importResult.failed_imports}</div>
+              <div className="text-sm text-gray-400 mt-1">Failed</div>
+            </div>
+          </div>
+
+          {/* Error Details */}
+          {importResult.error_log && importResult.error_log.length > 0 && (
+            <div className="bg-red-900/20 border border-red-900 rounded p-4">
+              <h3 className="text-red-500 font-mono text-sm mb-3">Errors:</h3>
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {importResult.error_log.map((err: any, i: number) => (
+                  <div key={i} className="text-sm">
+                    <span className="text-gray-400">{err.project_title}:</span>{' '}
+                    <span className="text-red-400">{err.error}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-center space-x-4">
+            <button
+              onClick={() => {
+                setStep('upload');
+                setJsonData([]);
+                setImportResult(null);
+              }}
+              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white transition-colors"
+            >
+              Import More
+            </button>
+            
+              href="/admin/projects"
+              className="px-6 py-2 bg-primary hover:bg-primary/80 rounded text-white transition-colors"
+            >
+              View Projects
+            </a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+## 9️⃣ Sample JSON Format for 25 Projects **[YOUR DATASET]**
+
+```json
+// public/sample-projects.json
+
+[
+  {
+    "title": "LED Matrix Clock",
+    "description": "Build a digital clock using an 8x8 LED matrix display with real-time clock module",
+    "detailed_description": "This beginner-friendly project teaches you the basics of Arduino programming, time management with RTC modules, and LED matrix control. Perfect for learning electronics fundamentals while creating a functional desk accessory.",
+    "thumbnail_url": "https://example.com/led-clock.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 85,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["arduino", "led", "rtc", "display"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Hobbystart"],
+        "notes": "Any Arduino board works"
+      },
+      {
+        "name": "8x8 LED Matrix (MAX7219)",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "DS3231 RTC Module",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["Hobbystart", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "Jumper Wires",
+        "quantity": 10,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Celectronix"]
+      },
+      {
+        "name": "Breadboard",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["CoThings", "SELI"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Gather Components",
+        "description": "Collect all required components from the list above. Ensure you have a USB cable to program the Arduino.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "title": "Wire the LED Matrix",
+        "description": "Connect the MAX7219 LED matrix to Arduino: VCC to 5V, GND to GND, DIN to pin 11, CS to pin 10, CLK to pin 13.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Connect RTC Module",
+        "description": "Wire DS3231: VCC to 5V, GND to GND, SDA to A4, SCL to A5.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 4,
+        "title": "Install Libraries",
+        "description": "Open Arduino IDE and install 'MD_Parola', 'MD_MAX72xx', and 'RTClib' libraries via Library Manager.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 5,
+        "title": "Upload Code",
+        "description": "Copy the provided code, set the correct time, and upload to Arduino.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 6,
+        "title": "Test and Calibrate",
+        "description": "Power up the system and verify the time display. Adjust if needed.",
+        "estimated_time_minutes": 10
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "video",
+        "title": "Arduino LED Matrix Basics",
+        "url": "https://youtube.com/example",
+        "description": "Comprehensive tutorial on LED matrix control"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Line Following Robot",
+    "description": "Autonomous robot that follows a black line using IR sensors and motor control",
+    "detailed_description": "Learn robotics fundamentals by building a line-following robot. This project covers sensor integration, motor control, PID algorithms, and autonomous navigation - essential skills for any robotics enthusiast.",
+    "thumbnail_url": "https://example.com/line-robot.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 180,
+    "time_commitment": "medium",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["robotics", "sensors", "motors", "automation"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "IR Sensor Module (TCRT5000)",
+        "quantity": 3,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "DC Gear Motors (6V)",
+        "quantity": 2,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Spacetec", "Didactico"]
+      },
+      {
+        "name": "L298N Motor Driver",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "RES Tunisia"]
+      },
+      {
+        "name": "Robot Chassis Kit",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["Didactico", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "Battery Holder (4xAA)",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "Celectronix"]
+      },
+      {
+        "name": "Jumper Wires",
+        "quantity": 20,
+        "avg_price_tnd": 7,
+        "local_suppliers": ["SELI", "CoThings"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Assemble Robot Chassis",
+        "description": "Build the chassis, attach motors to wheels, and secure the battery holder.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 2,
+        "title": "Mount Arduino and Driver",
+        "description": "Secure Arduino and L298N motor driver to the chassis using screws or double-sided tape.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 3,
+        "title": "Install IR Sensors",
+        "description": "Mount three IR sensors at the front: left, center, and right. Position them 5-10mm from the ground.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 4,
+        "title": "Wire Motor Driver",
+        "description": "Connect motors to L298N outputs. Wire L298N to Arduino: ENA to pin 5, IN1 to pin 6, IN2 to pin 7, IN3 to pin 8, IN4 to pin 9, ENB to pin 10.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 5,
+        "title": "Connect Sensors",
+        "description": "Wire IR sensors: VCC to 5V, GND to GND, OUT pins to Arduino pins 2, 3, 4.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 6,
+        "title": "Program Logic",
+        "description": "Write code for line detection and motor control. Implement basic logic: if center sensor detects line, go straight; if left sensor detects, turn left; if right sensor detects, turn right.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 7,
+        "title": "Calibrate Sensors",
+        "description": "Test sensor readings on white and black surfaces. Adjust threshold values in code.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 8,
+        "title": "Test on Track",
+        "description": "Create a test track with black electrical tape on white surface. Fine-tune motor speeds and turning logic.",
+        "estimated_time_minutes": 40
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "article",
+        "title": "IR Sensor Calibration Guide",
+        "url": "https://example.com/ir-calibration"
+      },
+      {
+        "type": "video",
+        "title": "PID Control for Line Followers",
+        "url": "https://youtube.com/example-pid"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Smart Plant Watering System",
+    "description": "Automated plant care system with soil moisture sensor and water pump control",
+    "thumbnail_url": "https://example.com/plant-water.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 95,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["iot", "sensors", "automation", "arduino"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "Soil Moisture Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "5V Water Pump",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["RES Tunisia", "Spacetec"]
+      },
+      {
+        "name": "Relay Module (5V)",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "Silicone Tube (1m)",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      },
+      {
+        "name": "Power Adapter (5V 2A)",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Qantra", "SELI"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Connect Moisture Sensor",
+        "description": "Wire sensor: VCC to 5V, GND to GND, AO to A0 on Arduino.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "title": "Setup Relay Module",
+        "description": "Connect relay: VCC to 5V, GND to GND, IN to pin 7. Connect pump to relay normally-open terminal.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Write Control Code",
+        "description": "Program Arduino to read moisture level and activate pump when soil is dry.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 4,
+        "title": "Calibrate Threshold",
+        "description": "Test sensor in dry and wet soil to determine threshold value.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 5,
+        "title": "Install System",
+        "description": "Place sensor in soil, position pump in water reservoir, route tube to plant.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Bluetooth Controlled Car",
+    "description": "Build a smartphone-controlled car using Bluetooth module and motor driver",
+    "thumbnail_url": "https://example.com/bt-car.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 150,
+    "time_commitment": "medium",
+    "domain": ["electrical", "software", "mechanical"],
+    "tags": ["robotics", "bluetooth", "motors", "mobile-app"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "HC-05 Bluetooth Module",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "L298N Motor Driver",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "RES Tunisia"]
+      },
+      {
+        "name": "DC Motors with Wheels",
+        "quantity": 4,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["Didactico", "Spacetec"]
+      },
+      {
+        "name": "Car Chassis",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["Tuni-Smart Innovation", "Didactico"]
+      },
+      {
+        "name": "Battery Pack (7.4V)",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Qantra", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Assemble Chassis",
+        "description": "Build the car frame and attach motors.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 2,
+        "title": "Wire Motor Driver",
+        "description": "Connect L298N to Arduino and motors.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 3,
+        "title": "Connect Bluetooth Module",
+        "description": "Wire HC-05: TX to Arduino RX (pin 0), RX to TX (pin 1) via voltage divider.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 4,
+        "title": "Program Control Logic",
+        "description": "Write code to receive Bluetooth commands and control motors.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 5,
+        "title": "Install Mobile App",
+        "description": "Download Bluetooth controller app (e.g., Arduino Bluetooth Controller).",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 6,
+        "title": "Pair and Test",
+        "description": "Pair phone with HC-05 and test controls.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Ultrasonic Distance Meter",
+    "description": "Digital distance measuring device using ultrasonic sensor and OLED display",
+    "thumbnail_url": "https://example.com/distance-meter.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 70,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["sensors", "display", "arduino", "measurement"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "HC-SR04 Ultrasonic Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "0.96\" OLED Display (I2C)",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Hobbystart", "Celectronix"]
+      },
+      {
+        "name": "Jumper Wires",
+        "quantity": 10,
+```json
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "CoThings"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Ultrasonic Sensor",
+        "description": "Connect HC-SR04: VCC to 5V, GND to GND, TRIG to pin 9, ECHO to pin 10.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "title": "Connect OLED Display",
+        "description": "Wire OLED: VCC to 5V, GND to GND, SDA to A4, SCL to A5.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "title": "Install Display Library",
+        "description": "Install Adafruit SSD1306 and Adafruit GFX libraries.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "title": "Write Measurement Code",
+        "description": "Program Arduino to measure distance and display on OLED.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 5,
+        "title": "Calibrate and Test",
+        "description": "Test with known distances and verify accuracy.",
+        "estimated_time_minutes": 15
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Temperature & Humidity Monitor",
+    "description": "Environmental monitoring system with DHT22 sensor and LCD display",
+    "thumbnail_url": "https://example.com/temp-monitor.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 65,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["sensors", "iot", "monitoring", "arduino"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "DHT22 Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 18,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "16x2 LCD Display (I2C)",
+        "quantity": 1,
+        "avg_price_tnd": 22,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "Jumper Wires",
+        "quantity": 5,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Connect DHT22 Sensor",
+        "description": "Wire DHT22: VCC to 5V, GND to GND, DATA to pin 2 with 10kΩ pull-up resistor.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "title": "Wire LCD Display",
+        "description": "Connect LCD I2C module: VCC to 5V, GND to GND, SDA to A4, SCL to A5.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "title": "Install Libraries",
+        "description": "Install DHT sensor library and LiquidCrystal I2C library.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "title": "Program Display Logic",
+        "description": "Write code to read sensor and display temperature/humidity.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 5,
+        "title": "Test and Calibrate",
+        "description": "Compare readings with known values and verify accuracy.",
+        "estimated_time_minutes": 10
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Mini Weather Station",
+    "description": "Complete weather monitoring system with multiple sensors and cloud logging",
+    "thumbnail_url": "https://example.com/weather-station.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 220,
+    "time_commitment": "medium",
+    "domain": ["electrical", "software", "hybrid"],
+    "tags": ["iot", "sensors", "cloud", "monitoring", "esp32"],
+    "components": [
+      {
+        "name": "ESP32 Development Board",
+        "quantity": 1,
+        "avg_price_tnd": 45,
+        "local_suppliers": ["Hobbystart", "CoThings"]
+      },
+      {
+        "name": "BME280 Sensor (Temp/Humidity/Pressure)",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["Souilah Electronique", "Celectronix"]
+      },
+      {
+        "name": "Rain Sensor Module",
+        "quantity": 1,
+        "avg_price_tnd": 18,
+        "local_suppliers": ["Tuni-Smart Innovation", "RES Tunisia"]
+      },
+      {
+        "name": "Light Sensor (BH1750)",
+        "quantity": 1,
+        "avg_price_tnd": 22,
+        "local_suppliers": ["CoThings", "Spacetec"]
+      },
+      {
+        "name": "1.3\" OLED Display",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Hobbystart", "Celectronix"]
+      },
+      {
+        "name": "Solar Panel (5V 1W)",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["RES Tunisia", "Qantra"]
+      },
+      {
+        "name": "18650 Battery Holder",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["SELI", "Didactico"]
+      },
+      {
+        "name": "Waterproof Enclosure",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire All Sensors",
+        "description": "Connect BME280, rain sensor, and light sensor to ESP32 using I2C and analog pins.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Display",
+        "description": "Wire OLED display to ESP32 I2C pins.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Setup Power System",
+        "description": "Connect solar panel and battery holder with charging circuit.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 4,
+        "title": "Configure WiFi",
+        "description": "Program ESP32 to connect to WiFi and set up cloud service (ThingSpeak/Blynk).",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 5,
+        "title": "Program Data Logging",
+        "description": "Write code to read all sensors and send data to cloud every 5 minutes.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 6,
+        "title": "Build Dashboard",
+        "description": "Create visualization dashboard on cloud platform.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 7,
+        "title": "Weatherproof Assembly",
+        "description": "Mount components in waterproof enclosure with proper ventilation for sensors.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 8,
+        "title": "Outdoor Installation",
+        "description": "Install weather station outdoors with good sun exposure and protection from direct rain.",
+        "estimated_time_minutes": 30
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "documentation",
+        "title": "ESP32 WiFi Guide",
+        "url": "https://docs.espressif.com/wifi"
+      },
+      {
+        "type": "video",
+        "title": "ThingSpeak IoT Tutorial",
+        "url": "https://youtube.com/example-thingspeak"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Servo Motor Robotic Arm",
+    "description": "3-DOF robotic arm controlled by servo motors with joystick interface",
+    "thumbnail_url": "https://example.com/robot-arm.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 195,
+    "time_commitment": "medium",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["robotics", "servos", "mechanics", "control"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "MG996R Servo Motors",
+        "quantity": 4,
+        "avg_price_tnd": 80,
+        "local_suppliers": ["Spacetec", "Didactico"]
+      },
+      {
+        "name": "Joystick Module (Dual-Axis)",
+        "quantity": 2,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["CoThings", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "Acrylic Arm Kit",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["Didactico", "Spacetec"]
+      },
+      {
+        "name": "Power Supply (5V 3A)",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Assemble Mechanical Structure",
+        "description": "Build the acrylic arm kit following manufacturer instructions. Attach servos to joints.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 2,
+        "title": "Wire Servo Motors",
+        "description": "Connect all servos to Arduino PWM pins (9, 10, 11, 12) with external 5V power supply.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 3,
+        "title": "Connect Joysticks",
+        "description": "Wire joystick modules to analog pins for X/Y axis reading.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 4,
+        "title": "Program Control Logic",
+        "description": "Write code to map joystick positions to servo angles.",
+        "estimated_time_minutes": 50
+      },
+      {
+        "step_number": 5,
+        "title": "Calibrate Range of Motion",
+        "description": "Test each joint and adjust servo limits to prevent mechanical damage.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 6,
+        "title": "Fine-Tune Control",
+        "description": "Adjust sensitivity and add smooth motion algorithms.",
+        "estimated_time_minutes": 25
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "RFID Access Control System",
+    "description": "Electronic door lock system using RFID cards for authentication",
+    "thumbnail_url": "https://example.com/rfid-lock.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 140,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["security", "rfid", "automation", "iot"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "MFRC522 RFID Reader",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "RFID Cards/Tags",
+        "quantity": 5,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "Electromagnetic Lock (12V)",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["RES Tunisia", "Spacetec"]
+      },
+      {
+        "name": "Relay Module (12V)",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Qantra"]
+      },
+      {
+        "name": "Buzzer Module",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "Power Supply (12V 2A)",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire RFID Reader",
+        "description": "Connect MFRC522 to Arduino SPI pins: SDA to pin 10, SCK to pin 13, MOSI to pin 11, MISO to pin 12, RST to pin 9.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Relay and Lock",
+        "description": "Wire relay to pin 7, connect electromagnetic lock to relay and 12V power supply.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 3,
+        "title": "Add Buzzer Feedback",
+        "description": "Connect buzzer to pin 8 for audio feedback.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 4,
+        "title": "Read Card UIDs",
+        "description": "Use sample code to read and record authorized card UIDs.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 5,
+        "title": "Program Access Control",
+        "description": "Write code to compare scanned cards with authorized UIDs and control lock.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 6,
+        "title": "Test Access System",
+        "description": "Test with authorized and unauthorized cards, verify lock/unlock timing.",
+        "estimated_time_minutes": 15
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Voice Controlled Home Automation",
+    "description": "Control home appliances using voice commands via Bluetooth and smartphone",
+    "thumbnail_url": "https://example.com/voice-control.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 165,
+    "time_commitment": "medium",
+    "domain": ["electrical", "software", "hybrid"],
+    "tags": ["iot", "automation", "voice-control", "smart-home"],
+    "components": [
+      {
+        "name": "Arduino Mega",
+        "quantity": 1,
+        "avg_price_tnd": 50,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "HC-05 Bluetooth Module",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "4-Channel Relay Module",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["CoThings", "RES Tunisia"]
+      },
+      {
+        "name": "AC Socket Outlets",
+        "quantity": 4,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      },
+      {
+        "name": "Electrical Wire (3m)",
+        "quantity": 1,
+        "avg_price_tnd": 10,
+        "local_suppliers": ["SELI", "Qantra"]
+      },
+      {
+        "name": "Enclosure Box",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Relay Module",
+        "description": "Connect 4-channel relay to Arduino pins 22, 24, 26, 28.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Bluetooth Module",
+        "description": "Wire HC-05 to Arduino Serial1 (TX1/RX1).",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Wire AC Outlets (CAUTION)",
+        "description": "SAFETY FIRST: Disconnect all power. Wire each outlet through relay normally-open contacts. Use proper electrical insulation.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 4,
+        "title": "Program Command Parser",
+        "description": "Write code to receive Bluetooth commands and control relays.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 5,
+        "title": "Install Voice App",
+        "description": "Install voice-to-text Bluetooth app on smartphone.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 6,
+        "title": "Mount in Enclosure",
+        "description": "Safely mount all components in enclosure with proper ventilation.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 7,
+        "title": "Test Voice Commands",
+        "description": "Test commands like 'light on', 'fan off' and verify responses.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "article",
+        "title": "Electrical Safety Guide",
+        "url": "https://example.com/electrical-safety"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Obstacle Avoiding Robot",
+    "description": "Autonomous robot that detects and avoids obstacles using ultrasonic sensors",
+    "thumbnail_url": "https://example.com/obstacle-robot.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 160,
+    "time_commitment": "medium",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["robotics", "sensors", "autonomous", "navigation"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "HC-SR04 Ultrasonic Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "SG90 Servo Motor",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["Didactico", "Spacetec"]
+      },
+      {
+        "name": "L298N Motor Driver",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "RES Tunisia"]
+      },
+      {
+        "name": "DC Motors with Wheels",
+        "quantity": 2,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Tuni-Smart Innovation", "Didactico"]
+      },
+      {
+        "name": "Robot Chassis",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Didactico", "Spacetec"]
+      },
+      {
+        "name": "Battery Holder (4xAA)",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "Celectronix"]
+      },
+      {
+        "name": "Jumper Wires",
+        "quantity": 20,
+        "avg_price_tnd": 10,
+        "local_suppliers": ["SELI", "CoThings"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Build Robot Base",
+        "description": "Assemble chassis and mount motors with wheels.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 2,
+        "title": "Mount Servo and Sensor",
+        "description": "Attach servo to front of chassis, mount ultrasonic sensor on servo horn for scanning.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 3,
+        "title": "Wire Motor Driver",
+        "description": "Connect L298N to Arduino and motors.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "title": "Connect Sensor and Servo",
+        "description": "Wire ultrasonic sensor and servo to Arduino.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 5,
+        "title": "Program Navigation Logic",
+        "description": "Write code: scan left/right, measure distances, choose path with most clearance.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 6,
+        "title": "Test and Tune",
+        "description": "Test in open area with obstacles, adjust detection distance and turning angles.",
+        "estimated_time_minutes": 30
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Basic Quadcopter Drone",
+    "description": "Build a simple quadcopter with flight controller and radio control",
+    "thumbnail_url": "https://example.com/quadcopter.jpg",
+    "difficulty": "advanced",
+    "estimated_cost_tnd": 520,
+    "time_commitment": "long",
+    "domain": ["aero", "electrical", "software"],
+    "tags": ["drone", "flight-controller", "radio-control", "quadcopter"],
+    "components": [
+      {
+        "name": "Flight Controller (KK2.1.5)",
+        "quantity": 1,
+        "avg_price_tnd": 80,
+        "local_suppliers": ["Spacetec", "RES Tunisia"]
+      },
+      {
+        "name": "Brushless Motors (1000KV)",
+        "quantity": 4,
+        "avg_price_tnd": 120,
+        "local_suppliers": ["Spacetec", "Qantra"]
+      },
+      {
+        "name": "30A ESC (Electronic Speed Controller)",
+        "quantity": 4,
+        "avg_price_tnd": 100,
+        "local_suppliers": ["Spacetec", "RES Tunisia"]
+      },
+      {
+        "name": "10\" Propellers (CW/CCW)",
+        "quantity": 2,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Spacetec", "Qantra"]
+      },
+      {
+        "name": "Quadcopter Frame (450mm)",
+        "quantity": 1,
+        "avg_price_tnd": 60,
+        "local_suppliers": ["Spacetec", "Didactico"]
+      },
+      {
+        "name": "LiPo Battery (11.1V 2200mAh)",
+        "quantity": 1,
+        "avg_price_tnd": 70,
+        "local_suppliers": ["Spacetec", "RES Tunisia"]
+      },
+      {
+        "name": "6-Channel RC Transmitter/Receiver",
+        "quantity": 1,
+        "avg_price_tnd": 100,
+        "local_suppliers": ["Spacetec", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Assemble Frame",
+        "description": "Build quadcopter frame following manufacturer instructions. Ensure proper motor mount alignment.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 2,
+        "title": "Mount Motors",
+        "description": "Install motors on frame arms, note clockwise and counter-clockwise rotation.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 3,
+        "title": "Connect ESCs",
+        "description": "Solder ESCs to motors, connect all ESCs to flight controller.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 4,
+        "title": "Install Flight Controller",
+        "description": "Mount flight controller at center of frame, ensure it's level.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 5,
+        "title": "Wire Power Distribution",
+        "description": "Connect battery to power distribution board, wire to ESCs and flight controller.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 6,
+        "title": "Bind Receiver",
+        "description": "Bind RC receiver to transmitter, connect receiver to flight controller.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 7,
+        "title": "Calibrate Flight Controller",
+        "description": "Use flight controller menu to calibrate accelerometer, set PID values.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 8,
+        "title": "Calibrate ESCs",
+        "description": "Calibrate all ESCs for consistent motor response.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 9,
+        "title": "Balance Propellers",
+        "description": "Balance all propellers to reduce vibration.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 10,
+        "title": "Ground Testing",
+        "description": "Test all controls without props, verify motor directions and responses.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 11,
+        "title": "First Flight Test",
+        "description": "SAFETY: Fly in open area away from people. Start with gentle throttle, hover at low altitude.",
+        "estimated_time_minutes": 45
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "video",
+        "title": "Quadcopter PID Tuning Guide",
+        "url": "https://youtube.com/example-pid-tuning"
+      },
+      {
+        "type": "article",
+        "title": "Drone Safety Guidelines",
+        "url": "https://example.com/drone-safety"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Solar Powered Phone Charger",
+    "description": "Portable solar charging station with battery backup and USB output",
+    "thumbnail_url": "https://example.com/solar-charger.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 110,
+    "time_commitment": "short",
+    "domain": ["electrical"],
+    "tags": ["solar", "power", "portable", "green-energy"],
+    "components": [
+      {
+        "name": "Solar Panel (6V 3W)",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["RES Tunisia", "Qantra"]
+      },
+      {
+        "name": "TP4056 Charging Module",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "18650 Li-ion Battery",
+        "quantity": 2,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Qantra", "RES Tunisia"]
+      },
+      {
+        "name": "Battery Holder (2x18650)",
+        "quantity": 1,
+        "avg_price_tnd": 10,
+        "local_suppliers": ["SELI", "Didactico"]
+      },
+      {
+        "name": "DC-DC Boost Converter (5V USB)",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "USB Port Module",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Celectronix"]
+      },
+      {
+        "name": "Project Box",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Charging Circuit",
+        "description": "Connect solar panel to TP4056 input, batteries to TP4056 output.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Boost Converter",
+        "description": "Wire boost converter input to battery positive/negative, set output to 5V.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Install USB Port",
+        "description": "Connect USB port to boost converter 5V output.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 4,
+        "title": "Test Charging",
+        "description": "Place solar panel in sunlight, verify battery charging LED indicators.",
+        "estimated_time_minutes": 15
+```json
+      },
+      {
+        "step_number": 5,
+        "title": "Assemble in Enclosure",
+        "description": "Mount all components in project box, drill holes for solar panel cable and USB port.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 6,
+        "title": "Test Phone Charging",
+        "description": "Connect phone and verify 5V USB output, test charging speed.",
+        "estimated_time_minutes": 10
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "RGB LED Mood Lamp",
+    "description": "Color-changing ambient lamp controlled via smartphone app",
+    "thumbnail_url": "https://example.com/mood-lamp.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 75,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["led", "bluetooth", "lighting", "iot"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "RGB LED Strip (WS2812B, 1m)",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "HC-05 Bluetooth Module",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "Power Supply (5V 2A)",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Connect LED Strip",
+        "description": "Wire WS2812B: Data to Arduino pin 6, VCC to 5V, GND to GND.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "title": "Wire Bluetooth Module",
+        "description": "Connect HC-05 to Arduino Serial pins with voltage divider.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Install FastLED Library",
+        "description": "Add FastLED library for LED strip control.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "title": "Program Color Control",
+        "description": "Write code to receive RGB values via Bluetooth and update LED colors.",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 5,
+        "title": "Add Animations",
+        "description": "Implement fade, rainbow, and strobe effects.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 6,
+        "title": "Test with App",
+        "description": "Use RGB controller app to test all colors and effects.",
+        "estimated_time_minutes": 10
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Digital Weighing Scale",
+    "description": "Precision weighing scale using load cell and HX711 amplifier",
+    "thumbnail_url": "https://example.com/weighing-scale.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 85,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["sensors", "measurement", "display", "arduino"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "Load Cell (5kg)",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "HX711 Amplifier Module",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "16x2 LCD Display",
+        "quantity": 1,
+        "avg_price_tnd": 22,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "Push Button",
+        "quantity": 1,
+        "avg_price_tnd": 2,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Load Cell to HX711",
+        "description": "Connect load cell wires to HX711 (Red: E+, Black: E-, White: A-, Green: A+).",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 2,
+        "title": "Connect HX711 to Arduino",
+        "description": "Wire HX711: DT to pin 3, SCK to pin 2, VCC to 5V, GND to GND.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "title": "Wire LCD Display",
+        "description": "Connect LCD to Arduino using I2C or parallel interface.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 4,
+        "title": "Install HX711 Library",
+        "description": "Add HX711 Arduino library via Library Manager.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 5,
+        "title": "Calibrate Load Cell",
+        "description": "Run calibration code with known weights (100g, 500g, 1kg).",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 6,
+        "title": "Program Display Logic",
+        "description": "Write code to read weight and display with tare function.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 7,
+        "title": "Build Platform",
+        "description": "Create a stable platform to mount load cell and weighing surface.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Fingerprint Door Lock",
+    "description": "Biometric security system using fingerprint sensor for access control",
+    "thumbnail_url": "https://example.com/fingerprint-lock.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 175,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["security", "biometric", "automation", "sensors"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "R307 Fingerprint Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 60,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "12V Solenoid Lock",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["RES Tunisia", "Spacetec"]
+      },
+      {
+        "name": "Relay Module (12V)",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Qantra"]
+      },
+      {
+        "name": "16x2 LCD Display",
+        "quantity": 1,
+        "avg_price_tnd": 22,
+        "local_suppliers": ["Hobbystart", "Celectronix"]
+      },
+      {
+        "name": "Buzzer Module",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "Power Supply (12V 2A)",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Connect Fingerprint Sensor",
+        "description": "Wire R307: TX to Arduino pin 2, RX to pin 3, VCC to 5V, GND to GND.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "title": "Wire Relay and Lock",
+        "description": "Connect relay to pin 7, wire solenoid lock to relay and 12V power.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 3,
+        "title": "Connect LCD and Buzzer",
+        "description": "Wire LCD for user feedback, connect buzzer to pin 8.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 4,
+        "title": "Install Fingerprint Library",
+        "description": "Add Adafruit Fingerprint Sensor library.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 5,
+        "title": "Enroll Fingerprints",
+        "description": "Run enrollment code to register authorized fingerprints (up to 127).",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 6,
+        "title": "Program Access Control",
+        "description": "Write code to verify fingerprints and control lock with timeout.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 7,
+        "title": "Test Security System",
+        "description": "Test with enrolled and non-enrolled fingers, verify lock timing.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "GPS Tracker with GSM",
+    "description": "Real-time location tracking device using GPS and GSM modules",
+    "thumbnail_url": "https://example.com/gps-tracker.jpg",
+    "difficulty": "advanced",
+    "estimated_cost_tnd": 280,
+    "time_commitment": "medium",
+    "domain": ["electrical", "software", "hybrid"],
+    "tags": ["gps", "gsm", "tracking", "iot", "mobile"],
+    "components": [
+      {
+        "name": "Arduino Mega",
+        "quantity": 1,
+        "avg_price_tnd": 50,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "NEO-6M GPS Module",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["Hobbystart", "Souilah Electronique"]
+      },
+      {
+        "name": "SIM800L GSM Module",
+        "quantity": 1,
+        "avg_price_tnd": 50,
+        "local_suppliers": ["Souilah Electronique", "CoThings"]
+      },
+      {
+        "name": "LiPo Battery (3.7V 2000mAh)",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["Qantra", "RES Tunisia"]
+      },
+      {
+        "name": "LiPo Charging Module",
+        "quantity": 1,
+        "avg_price_tnd": 10,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "Voltage Regulator (3.3V)",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "Souilah Electronique"]
+      },
+      {
+        "name": "GPS Antenna",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Hobbystart", "Spacetec"]
+      },
+      {
+        "name": "GSM Antenna",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["Souilah Electronique", "RES Tunisia"]
+      },
+      {
+        "name": "Waterproof Enclosure",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      },
+      {
+        "name": "SIM Card",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["Local Operators"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire GPS Module",
+        "description": "Connect NEO-6M: TX to Arduino Serial1 RX, RX to TX, VCC to 5V, GND to GND. Attach GPS antenna.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 2,
+        "title": "Connect GSM Module",
+        "description": "Wire SIM800L to Arduino Serial2, use 3.3V regulator for power. Insert SIM card and attach GSM antenna.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 3,
+        "title": "Setup Power Management",
+        "description": "Connect LiPo battery through charging module, wire to Arduino VIN.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "title": "Test GPS Fix",
+        "description": "Run GPS test code outdoors to verify satellite lock (may take 2-5 minutes).",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 5,
+        "title": "Test GSM Connection",
+        "description": "Test SIM800L registration and SMS functionality.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 6,
+        "title": "Program Tracking Logic",
+        "description": "Write code to read GPS coordinates and send via SMS or GPRS to server.",
+        "estimated_time_minutes": 90
+      },
+      {
+        "step_number": 7,
+        "title": "Implement Power Saving",
+        "description": "Add sleep modes and periodic wake-up for battery optimization.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 8,
+        "title": "Assemble in Enclosure",
+        "description": "Mount components securely, ensure antennas are properly positioned.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 9,
+        "title": "Field Testing",
+        "description": "Test tracking accuracy while moving, verify SMS delivery and battery life.",
+        "estimated_time_minutes": 60
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "documentation",
+        "title": "SIM800L AT Commands",
+        "url": "https://example.com/sim800l-commands"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Arduino Piano with Buzzer",
+    "description": "Simple musical instrument using push buttons and piezo buzzer",
+    "thumbnail_url": "https://example.com/arduino-piano.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 55,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["music", "arduino", "sound", "beginner"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "Piezo Buzzer",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "Push Buttons",
+        "quantity": 8,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "Qantra"]
+      },
+      {
+        "name": "10kΩ Resistors",
+        "quantity": 8,
+        "avg_price_tnd": 2,
+        "local_suppliers": ["SELI", "Celectronix"]
+      },
+      {
+        "name": "Breadboard",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["CoThings", "SELI"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Push Buttons",
+        "description": "Connect 8 push buttons to Arduino pins 2-9 with pull-down resistors.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Buzzer",
+        "description": "Wire piezo buzzer: positive to pin 11, negative to GND.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 3,
+        "title": "Program Note Frequencies",
+        "description": "Write code mapping each button to musical notes (C, D, E, F, G, A, B, C).",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "title": "Add Melodies",
+        "description": "Program simple songs that can be played by pressing buttons in sequence.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 5,
+        "title": "Test and Play",
+        "description": "Test all buttons and play simple tunes.",
+        "estimated_time_minutes": 15
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Automatic Pet Feeder",
+    "description": "Scheduled pet feeding system with servo motor and RTC module",
+    "thumbnail_url": "https://example.com/pet-feeder.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 135,
+    "time_commitment": "medium",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["automation", "servo", "rtc", "pet-care"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "DS3231 RTC Module",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["Hobbystart", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "MG996R Servo Motor",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["Spacetec", "Didactico"]
+      },
+      {
+        "name": "16x2 LCD Display",
+        "quantity": 1,
+        "avg_price_tnd": 22,
+        "local_suppliers": ["Hobbystart", "Celectronix"]
+      },
+      {
+        "name": "Push Buttons",
+        "quantity": 3,
+        "avg_price_tnd": 3,
+        "local_suppliers": ["SELI", "Qantra"]
+      },
+      {
+        "name": "Food Container",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Local Stores"]
+      },
+      {
+        "name": "Power Supply (5V 2A)",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Build Dispenser Mechanism",
+        "description": "Create rotating dispensing mechanism using servo and food container.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 2,
+        "title": "Wire RTC Module",
+        "description": "Connect DS3231: VCC to 5V, GND to GND, SDA to A4, SCL to A5.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "title": "Connect Servo Motor",
+        "description": "Wire servo to pin 9 with external power supply.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 4,
+        "title": "Wire LCD and Buttons",
+        "description": "Connect LCD and 3 buttons for setting feeding times.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 5,
+        "title": "Program Schedule Logic",
+        "description": "Write code for multiple daily feeding times, portion control.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 6,
+        "title": "Add Menu Interface",
+        "description": "Create menu system for setting times and portions using buttons.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 7,
+        "title": "Test Dispensing",
+        "description": "Test portion sizes and adjust servo rotation angles.",
+        "estimated_time_minutes": 30
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "WiFi Controlled Robot Car",
+    "description": "Robot car controlled through web browser using ESP32 WiFi",
+    "thumbnail_url": "https://example.com/wifi-car.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 185,
+    "time_commitment": "medium",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["wifi", "robotics", "iot", "web-control", "esp32"],
+    "components": [
+      {
+        "name": "ESP32 Development Board",
+        "quantity": 1,
+        "avg_price_tnd": 45,
+        "local_suppliers": ["Hobbystart", "CoThings"]
+      },
+      {
+        "name": "L298N Motor Driver",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "RES Tunisia"]
+      },
+      {
+        "name": "DC Motors with Wheels",
+        "quantity": 4,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["Didactico", "Spacetec"]
+      },
+      {
+        "name": "Robot Chassis",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Didactico", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "18650 Battery with Holder",
+        "quantity": 2,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["Qantra", "RES Tunisia"]
+      },
+      {
+        "name": "Voltage Regulator (3.3V)",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "Souilah Electronique"]
+      },
+      {
+        "name": "Jumper Wires",
+        "quantity": 20,
+        "avg_price_tnd": 7,
+        "local_suppliers": ["SELI", "CoThings"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Assemble Car Chassis",
+        "description": "Build chassis and mount motors with wheels.",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 2,
+        "title": "Wire Motor Driver",
+        "description": "Connect L298N to ESP32 GPIO pins and motors.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 3,
+        "title": "Setup Power System",
+        "description": "Wire batteries with voltage regulation for ESP32.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "title": "Program WiFi Web Server",
+        "description": "Write code to create WiFi access point and web server on ESP32.",
+        "estimated_time_minutes": 50
+      },
+      {
+        "step_number": 5,
+        "title": "Design Control Interface",
+        "description": "Create HTML/CSS web interface with directional control buttons.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 6,
+        "title": "Implement Motor Control",
+        "description": "Write motor control logic for forward, backward, left, right, stop.",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 7,
+        "title": "Test Web Control",
+        "description": "Connect to WiFi network, access web interface, test all controls.",
+        "estimated_time_minutes": 25
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "documentation",
+        "title": "ESP32 Web Server Tutorial",
+        "url": "https://example.com/esp32-webserver"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Smart Parking Sensor",
+    "description": "Ultrasonic parking assistance system with LED distance indicators",
+    "thumbnail_url": "https://example.com/parking-sensor.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 80,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["sensors", "automotive", "arduino", "ultrasonic"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "HC-SR04 Ultrasonic Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "LED Bar Graph (10-segment)",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["Celectronix", "Souilah Electronique"]
+      },
+      {
+        "name": "Buzzer Module",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "220Ω Resistors",
+        "quantity": 10,
+        "avg_price_tnd": 2,
+        "local_suppliers": ["SELI", "Qantra"]
+      },
+      {
+        "name": "Project Box",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      },
+      {
+        "name": "12V Car Adapter",
+        "quantity": 1,
+        "avg_price_tnd": 10,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Ultrasonic Sensor",
+        "description": "Connect HC-SR04: TRIG to pin 9, ECHO to pin 10, VCC to 5V, GND to GND.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "title": "Connect LED Bar Graph",
+        "description": "Wire 10 LEDs to Arduino pins 2-11 through resistors.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 3,
+        "title": "Add Buzzer",
+        "description": "Connect buzzer to pin 12 for audio alerts.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "title": "Program Distance Display",
+        "description": "Write code to display distance as LED bar (more LEDs = closer).",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 5,
+        "title": "Add Audio Feedback",
+        "description": "Implement buzzer beeping that increases frequency as distance decreases.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 6,
+        "title": "Assemble in Enclosure",
+        "description": "Mount components in project box with clear front for sensor.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 7,
+        "title": "Test Installation",
+        "description": "Test in vehicle, verify sensor range and LED/buzzer response.",
+        "estimated_time_minutes": 15
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Arduino-Based Thermostat",
+    "description": "Temperature-controlled relay system for heating/cooling automation",
+    "thumbnail_url": "https://example.com/thermostat.jpg",
+    "difficulty": "beginner",
+    "estimated_cost_tnd": 90,
+    "time_commitment": "short",
+    "domain": ["electrical", "software"],
+    "tags": ["temperature", "automation", "relay", "control-system"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "DS18B20 Temperature Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "16x2 LCD Display (I2C)",
+        "quantity": 1,
+        "avg_price_tnd": 22,
+        "local_suppliers": ["CoThings", "C
+```json
+electronics"]
+      },
+      {
+        "name": "Relay Module (220V 10A)",
+        "quantity": 1,
+        "avg_price_tnd": 18,
+        "local_suppliers": ["CoThings", "RES Tunisia"]
+      },
+      {
+        "name": "Rotary Encoder",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["Celectronix", "Souilah Electronique"]
+      },
+      {
+        "name": "4.7kΩ Resistor",
+        "quantity": 1,
+        "avg_price_tnd": 1,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire Temperature Sensor",
+        "description": "Connect DS18B20: VCC to 5V, GND to GND, DATA to pin 2 with 4.7kΩ pull-up resistor.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "title": "Connect LCD Display",
+        "description": "Wire LCD I2C: VCC to 5V, GND to GND, SDA to A4, SCL to A5.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "title": "Wire Relay Module",
+        "description": "Connect relay signal pin to Arduino pin 7.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 4,
+        "title": "Connect Rotary Encoder",
+        "description": "Wire encoder: CLK to pin 3, DT to pin 4, SW to pin 5 for temperature setting.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 5,
+        "title": "Program Control Logic",
+        "description": "Write code for hysteresis control (turn on at setpoint-1°C, off at setpoint+1°C).",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 6,
+        "title": "Add Menu Interface",
+        "description": "Implement LCD menu for setting target temperature and mode (heat/cool).",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 7,
+        "title": "Test and Calibrate",
+        "description": "Test temperature readings and relay switching logic.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Motion-Activated Camera",
+    "description": "Security camera system with PIR sensor and photo capture using ESP32-CAM",
+    "thumbnail_url": "https://example.com/motion-camera.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 125,
+    "time_commitment": "short",
+    "domain": ["electrical", "software", "hybrid"],
+    "tags": ["security", "camera", "esp32", "iot", "motion-detection"],
+    "components": [
+      {
+        "name": "ESP32-CAM Module",
+        "quantity": 1,
+        "avg_price_tnd": 55,
+        "local_suppliers": ["Hobbystart", "CoThings"]
+      },
+      {
+        "name": "PIR Motion Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "FTDI Programmer (USB-TTL)",
+        "quantity": 1,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "MicroSD Card (16GB)",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Local Stores"]
+      },
+      {
+        "name": "Power Supply (5V 2A)",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["SELI", "Qantra"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Setup ESP32-CAM",
+        "description": "Connect FTDI programmer to ESP32-CAM for initial programming.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 2,
+        "title": "Test Camera Function",
+        "description": "Upload basic camera test code and verify image capture.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 3,
+        "title": "Wire PIR Sensor",
+        "description": "Connect PIR: VCC to 5V, GND to GND, OUT to GPIO 13.",
+        "estimated_time_minutes": 10
+      },
+      {
+        "step_number": 4,
+        "title": "Program Motion Detection",
+        "description": "Write code to trigger photo capture when PIR detects motion.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 5,
+        "title": "Setup SD Card Storage",
+        "description": "Configure microSD card for saving captured images with timestamps.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 6,
+        "title": "Add WiFi Notifications (Optional)",
+        "description": "Implement email or Telegram notifications when motion is detected.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 7,
+        "title": "Test System",
+        "description": "Test motion detection range, image quality, and storage.",
+        "estimated_time_minutes": 20
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "video",
+        "title": "ESP32-CAM Complete Guide",
+        "url": "https://youtube.com/example-esp32cam"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Arduino Game Console",
+    "description": "Handheld gaming device with OLED display and button controls",
+    "thumbnail_url": "https://example.com/game-console.jpg",
+    "difficulty": "intermediate",
+    "estimated_cost_tnd": 105,
+    "time_commitment": "medium",
+    "domain": ["electrical", "software"],
+    "tags": ["gaming", "display", "entertainment", "arduino"],
+    "components": [
+      {
+        "name": "Arduino Nano",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "1.3\" OLED Display (128x64)",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Hobbystart", "Celectronix"]
+      },
+      {
+        "name": "Push Buttons",
+        "quantity": 6,
+        "avg_price_tnd": 6,
+        "local_suppliers": ["SELI", "Qantra"]
+      },
+      {
+        "name": "Buzzer Module",
+        "quantity": 1,
+        "avg_price_tnd": 5,
+        "local_suppliers": ["SELI", "Tuni-Smart Innovation"]
+      },
+      {
+        "name": "9V Battery with Connector",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["SELI", "Qantra"]
+      },
+      {
+        "name": "10kΩ Resistors",
+        "quantity": 6,
+        "avg_price_tnd": 2,
+        "local_suppliers": ["SELI", "Celectronix"]
+      },
+      {
+        "name": "Prototype PCB",
+        "quantity": 1,
+        "avg_price_tnd": 8,
+        "local_suppliers": ["CoThings", "SELI"]
+      },
+      {
+        "name": "Project Enclosure",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire OLED Display",
+        "description": "Connect OLED: VCC to 5V, GND to GND, SDA to A4, SCL to A5.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Control Buttons",
+        "description": "Wire 6 buttons (Up, Down, Left, Right, A, B) to pins 2-7 with pull-down resistors.",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 3,
+        "title": "Add Buzzer",
+        "description": "Connect buzzer to pin 8 for game sound effects.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "title": "Install Graphics Library",
+        "description": "Add Adafruit SSD1306 and GFX libraries for display control.",
+        "estimated_time_minutes": 5
+      },
+      {
+        "step_number": 5,
+        "title": "Program Snake Game",
+        "description": "Write classic Snake game with collision detection and score tracking.",
+        "estimated_time_minutes": 90
+      },
+      {
+        "step_number": 6,
+        "title": "Add More Games",
+        "description": "Implement additional games: Pong, Breakout, Space Invaders (simplified).",
+        "estimated_time_minutes": 120
+      },
+      {
+        "step_number": 7,
+        "title": "Create Menu System",
+        "description": "Build game selection menu with high score display.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 8,
+        "title": "Assemble Console",
+        "description": "Solder components on PCB, mount in enclosure with button cutouts.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 9,
+        "title": "Test and Debug",
+        "description": "Test all games, verify button responsiveness and display refresh rate.",
+        "estimated_time_minutes": 30
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "Soil NPK Sensor System",
+    "description": "Agricultural monitoring system measuring Nitrogen, Phosphorus, and Potassium levels",
+    "thumbnail_url": "https://example.com/npk-sensor.jpg",
+    "difficulty": "advanced",
+    "estimated_cost_tnd": 245,
+    "time_commitment": "medium",
+    "domain": ["electrical", "software", "hybrid"],
+    "tags": ["agriculture", "sensors", "iot", "monitoring", "rs485"],
+    "components": [
+      {
+        "name": "Arduino Mega",
+        "quantity": 1,
+        "avg_price_tnd": 50,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "NPK Soil Sensor (RS485)",
+        "quantity": 1,
+        "avg_price_tnd": 120,
+        "local_suppliers": ["Tuni-Smart Innovation", "RES Tunisia"]
+      },
+      {
+        "name": "MAX485 TTL to RS485 Module",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "Soil Moisture Sensor",
+        "quantity": 1,
+        "avg_price_tnd": 15,
+        "local_suppliers": ["Tuni-Smart Innovation", "Souilah Electronique"]
+      },
+      {
+        "name": "2.4\" TFT LCD Display",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["Hobbystart", "Celectronix"]
+      },
+      {
+        "name": "Solar Panel (5V 2W)",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["RES Tunisia", "Qantra"]
+      },
+      {
+        "name": "18650 Battery Pack",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["Qantra", "RES Tunisia"]
+      },
+      {
+        "name": "Waterproof Enclosure",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["SELI", "RES Tunisia"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Wire RS485 Module",
+        "description": "Connect MAX485: DI to TX1, RO to RX1, DE/RE to pin 8, wire A/B to NPK sensor.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 2,
+        "title": "Connect Additional Sensors",
+        "description": "Wire soil moisture sensor to analog pin A0.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "title": "Wire TFT Display",
+        "description": "Connect TFT LCD using SPI pins.",
+        "estimated_time_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "title": "Setup Power System",
+        "description": "Wire solar panel and battery with charging circuit.",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 5,
+        "title": "Program Modbus Communication",
+        "description": "Write code to read NPK sensor using Modbus RTU protocol.",
+        "estimated_time_minutes": 90
+      },
+      {
+        "step_number": 6,
+        "title": "Create Display Interface",
+        "description": "Design TFT interface showing N, P, K values, moisture, and battery level.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 7,
+        "title": "Add Data Logging",
+        "description": "Implement SD card logging for historical data tracking.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 8,
+        "title": "Weatherproof Assembly",
+        "description": "Mount components in waterproof enclosure with proper sensor access.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 9,
+        "title": "Field Testing",
+        "description": "Test in agricultural soil, calibrate readings, verify power consumption.",
+        "estimated_time_minutes": 60
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "documentation",
+        "title": "Modbus Protocol Guide",
+        "url": "https://example.com/modbus-guide"
+      },
+      {
+        "type": "article",
+        "title": "Understanding NPK in Soil",
+        "url": "https://example.com/npk-agriculture"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  },
+  {
+    "title": "CNC Drawing Machine",
+    "description": "2-axis CNC plotter using stepper motors and GRBL controller",
+    "thumbnail_url": "https://example.com/cnc-plotter.jpg",
+    "difficulty": "advanced",
+    "estimated_cost_tnd": 340,
+    "time_commitment": "long",
+    "domain": ["mechanical", "electrical", "software"],
+    "tags": ["cnc", "stepper-motors", "grbl", "automation", "fabrication"],
+    "components": [
+      {
+        "name": "Arduino Uno",
+        "quantity": 1,
+        "avg_price_tnd": 35,
+        "local_suppliers": ["CoThings", "Hobbystart"]
+      },
+      {
+        "name": "CNC Shield v3",
+        "quantity": 1,
+        "avg_price_tnd": 25,
+        "local_suppliers": ["CoThings", "Souilah Electronique"]
+      },
+      {
+        "name": "NEMA 17 Stepper Motors",
+        "quantity": 2,
+        "avg_price_tnd": 80,
+        "local_suppliers": ["Spacetec", "RES Tunisia"]
+      },
+      {
+        "name": "A4988 Stepper Drivers",
+        "quantity": 2,
+        "avg_price_tnd": 20,
+        "local_suppliers": ["CoThings", "Celectronix"]
+      },
+      {
+        "name": "Linear Rails (300mm)",
+        "quantity": 2,
+        "avg_price_tnd": 60,
+        "local_suppliers": ["RES Tunisia", "Spacetec"]
+      },
+      {
+        "name": "GT2 Timing Belt Kit",
+        "quantity": 1,
+        "avg_price_tnd": 30,
+        "local_suppliers": ["Spacetec", "Didactico"]
+      },
+      {
+        "name": "SG90 Servo Motor",
+        "quantity": 1,
+        "avg_price_tnd": 12,
+        "local_suppliers": ["Didactico", "Spacetec"]
+      },
+      {
+        "name": "Power Supply (12V 5A)",
+        "quantity": 1,
+        "avg_price_tnd": 40,
+        "local_suppliers": ["RES Tunisia", "SELI"]
+      },
+      {
+        "name": "Aluminum Extrusion Frame",
+        "quantity": 1,
+        "avg_price_tnd": 50,
+        "local_suppliers": ["Local Hardware Stores"]
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Build Frame Structure",
+        "description": "Assemble aluminum frame for X and Y axis movement.",
+        "estimated_time_minutes": 90
+      },
+      {
+        "step_number": 2,
+        "title": "Install Linear Rails",
+        "description": "Mount linear rails and carriages for both axes.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 3,
+        "title": "Mount Stepper Motors",
+        "description": "Install NEMA 17 motors with pulleys for belt drive system.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 4,
+        "title": "Install Timing Belts",
+        "description": "Thread and tension GT2 belts for X and Y axes.",
+        "estimated_time_minutes": 40
+      },
+      {
+        "step_number": 5,
+        "title": "Wire CNC Shield",
+        "description": "Install A4988 drivers on CNC shield, connect to Arduino and motors.",
+        "estimated_time_minutes": 35
+      },
+      {
+        "step_number": 6,
+        "title": "Add Pen Lift Mechanism",
+        "description": "Mount servo motor for Z-axis pen up/down control.",
+        "estimated_time_minutes": 30
+      },
+      {
+        "step_number": 7,
+        "title": "Flash GRBL Firmware",
+        "description": "Upload GRBL firmware to Arduino for G-code interpretation.",
+        "estimated_time_minutes": 15
+      },
+      {
+        "step_number": 8,
+        "title": "Calibrate Steps/mm",
+        "description": "Calculate and set steps per millimeter for accurate movement.",
+        "estimated_time_minutes": 45
+      },
+      {
+        "step_number": 9,
+        "title": "Install Control Software",
+        "description": "Setup Universal G-code Sender or similar software on computer.",
+        "estimated_time_minutes": 20
+      },
+      {
+        "step_number": 10,
+        "title": "Test Drawing",
+        "description": "Run test patterns, adjust acceleration and maximum speeds.",
+        "estimated_time_minutes": 60
+      },
+      {
+        "step_number": 11,
+        "title": "Create SVG to G-code Workflow",
+        "description": "Learn to convert images to G-code using Inkscape plugins.",
+        "estimated_time_minutes": 40
+      }
+    ],
+    "learning_resources": [
+      {
+        "type": "video",
+        "title": "GRBL Configuration Tutorial",
+        "url": "https://youtube.com/example-grbl"
+      },
+      {
+        "type": "documentation",
+        "title": "G-code Commands Reference",
+        "url": "https://example.com/gcode-reference"
+      }
+    ],
+    "is_published": false,
+    "is_featured": false
+  }
+]
+```
+
+---
+
+## 🔟 Admin Routes Configuration
+
+```typescript
+// src/App.tsx - Protected Admin Routes
+
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useAuth } from './hooks/useAuth';
+import { useAdminPermissions } from './hooks/useAdminPermissions';
+
+// Admin Pages
+import AdminDashboard from './pages/admin/AdminDashboard';
+import ProjectsList from './pages/admin/ProjectsList';
+import ProjectEditor from './pages/admin/ProjectEditor';
+import ProjectCreate from './pages/admin/ProjectCreate';
+import ImportProjects from './pages/admin/ImportProjects';
+import ExportProjects from './pages/admin/ExportProjects';
+
+// Protected Route Component
+const AdminRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user } = useAuth();
+  const { isAdmin } = useAdminPermissions();
+
+  if (!user) {
+    return <Navigate to="/login" />;
+  }
+
+  if (!isAdmin) {
+    return <Navigate to="/" />;
+  }
+
+  return <>{children}</>;
+};
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Public Routes */}
+        <Route path="/" element={<Home />} />
+        <Route path="/projects/:slug" element={<ProjectDetails />} />
+        <Route path="/portfolio" element={<Portfolio />} />
+        <Route path="/community" element={<Community />} />
+        <Route path="/resources" element={<Resources />} />
+        <Route path="/ai-assistant" element={<AIAssistant />} />
+        
+        {/* Auth Routes */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
+
+        {/* Admin Routes - Protected */}
+        <Route path="/admin" element={
+          <AdminRoute>
+            <AdminDashboard />
+          </AdminRoute>
+        } />
+        <Route path="/admin/projects" element={
+          <AdminRoute>
+            <ProjectsList />
+          </AdminRoute>
+        } />
+        <Route path="/admin/projects/new" element={
+          <AdminRoute>
+            <ProjectCreate />
+          </AdminRoute>
+        } />
+        <Route path="/admin/projects/:id/edit" element={
+          <AdminRoute>
+            <ProjectEditor />
+          </AdminRoute>
+        } />
+        <Route path="/admin/import" element={
+          <AdminRoute>
+            <ImportProjects />
+          </AdminRoute>
+        } />
+        <Route path="/admin/export" element={
+          <AdminRoute>
+            <ExportProjects />
+          </AdminRoute>
+        } />
+
+        {/* 404 */}
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+```
+
+---
+
+## 1️⃣1️⃣ Admin Hook Implementation
+
+```typescript
+// src/hooks/useAdminPermissions.ts
+
+import { useEffect, useState } from 'react';
+import { supabase } from '@/services/supabase';
+
+export const useAdminPermissions = () => {
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    checkAdminStatus();
+  }, []);
+
+  const checkAdminStatus = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (!user) {
+        setIsAdmin(false);
+        setIsSuperAdmin(false);
+        setLoading(false);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('users')
+        .select('role')
+        .eq('id', user.id)
+        .single();
+
+      if (error) throw error;
+
+      setIsAdmin(data.role === 'admin' || data.role === 'super_admin');
+      setIsSuperAdmin(data.role === 'super_admin');
+    } catch (error) {
+      console.error('Error checking admin status:', error);
+      setIsAdmin(false);
+      setIsSuperAdmin(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return { isAdmin, isSuperAdmin, loading };
+};
+```
+
+---
+
+## 1️⃣2️⃣ Quick Start Guide for Admin
+
+### Initial Setup
+
+```bash
+# 1. Clone repository
+git clone https://github.com/your-repo/sparkshelf.git
+cd sparkshelf
+
+# 2. Install dependencies
+npm install
+
+# 3. Setup environment variables
+cp .env.example .env.local
+# Add your Supabase credentials
+
+# 4. Run database migrations
+npx supabase db push
+
+# 5. Create admin user
+npx supabase functions invoke create-admin --data '{"email":"admin@sparkshelf.tn","password":"securepassword"}'
+
+# 6. Start development server
+npm run dev
+```
+
+### Importing Your 25 Projects
+
+1. **Prepare JSON file**: Save the sample JSON above as `my-projects.json`
+2. **Login as admin**: Navigate to `/admin`
+3. **Go to Import**: Click "Import Projects" in admin menu
+4. **Upload file**: Upload `my-projects.json`
+5. **Review validation**: Check for any errors
+6. **Configure settings**:
+   - ☑ Auto-publish (if ready to go live)
+   - ☐ Overwrite existing (first import)
+7. **Execute import**: Click "Import 25 Projects"
+8. **Verify**: Check `/admin/projects` to see imported projects
+
+### Managing Projects
+
+```typescript
+// Quick actions from admin dashboard:
+
+// View all projects (published & unpublished)
+GET /admin/projects
+
+// Edit a project
+PATCH /admin/projects/:id
+
+// Bulk publish
+POST /admin/projects/bulk-status
+{ project_ids: [...], is_published: true }
+
+// Export all as backup
+GET /admin/projects/export?format=json
+```
+
+---
+
+## Summary
+
+This comprehensive update provides you with:
+
+✅ **Full CRUD control** over projects via admin panel  
+✅ **Bulk import/export** for managing your 25-project dataset  
+✅ **Version control** with project revisions  
+✅ **Role-based access** (super_admin, admin, user)  
+✅ **Rich editing interface** with components, steps, and media upload  
+✅ **Sample dataset** of 25 diverse robotics projects  
+✅ **Complete admin service** with TypeScript types  
+✅ **Protected routes** and permission checks  
+✅ **Data validation** before import  
+✅ **Import logs** for tracking bulk operations  
+
+You now have complete control over your project database with an intuitive admin interface! 🚀
